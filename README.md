@@ -19,7 +19,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 5. If one or more terms match, only terms not already loaded in the current session are attached to the prompt as hidden context: the model sees the definitions, while the transcript shows your prompt as typed. The first injection in a session includes guidance for interpreting glossary definitions; later injections include only the `## Glossary` heading and new term definitions.
 6. Loaded terms stay visible for the rest of the session in the status line as `Glossary: term, term`.
 7. Matched terms are highlighted live in the prompt box as you type.
-8. After a context compaction, loaded terms are reset, so they are re-injected when mentioned again.
+8. After a context compaction or a `/clear`, loaded terms are reset, so they are re-injected when mentioned again.
 
 ## What It Does
 
@@ -129,7 +129,7 @@ In this example, the local `deploy` entry is listed first and wins over any `dep
 
 | Source | Example |
 |--------|---------|
-| Local path (relative) | `"include": "../shared/glossary.json"` |
+| Local path (relative to the project directory) | `"include": "../shared/glossary.json"` |
 | Local path (absolute) | `"include": "/home/user/.config/glossary.json"` |
 | Local path (no extension) | `"include": "extras"` — resolves to `extras.json` or `extras.jsonl` |
 | GitHub file (browser URL) | `"include": "https://github.com/org/repo/blob/main/glossary.json"` |
@@ -144,6 +144,7 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - Circular includes (A includes B which includes A) are detected and skipped with a warning.
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
 - Included files may themselves contain `include` directives (recursive).
+- Relative local paths resolve against the project directory (where Claude Code was started), not against the file that contains the include. This applies to includes in the global glossary and in nested includes too, so prefer absolute paths there.
 - GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available.
 
 ## Glossary Entry Fields
@@ -215,14 +216,14 @@ When multiple entries match the same prompt, all matching entries are considered
 
 | Command | Description |
 |---------|-------------|
-| `/glossary` | Open an interactive glossary browser pane (type to search, Tab to move between terms, Esc to close; if typing lands in the prompt box, press ctrl+x tab to focus the pane) |
+| `/glossary` | Open an interactive glossary browser pane (type to search, Tab to move between terms, Esc to close; if typing lands in the prompt box, press ctrl+x tab to focus the pane). Under `claude -p`, where no pane can be drawn, it prints the term list instead |
 | `/glossary reload` | Reload `~/.claude/glossary.json` or `~/.claude/glossary.jsonl`, and `.claude/glossary.json` or `.claude/glossary.jsonl`, without restarting Claude Code. Also resets the session's loaded terms |
 
 ## Notes
 
 - Glossary data can be global (`~/.claude/glossary.json` or `~/.claude/glossary.jsonl`) or project-scoped (`.claude/glossary.json` or `.claude/glossary.jsonl`).
 - Nothing is injected when the prompt does not mention a glossary handle.
-- Once a term is loaded in a session, mentioning it again does not inject it again (until a compaction or `/glossary reload`).
+- Once a term is loaded in a session, mentioning it again does not inject it again (until a compaction, a `/clear`, or `/glossary reload`).
 - If you edit any glossary file (`glossary.json` or `glossary.jsonl`), run `/glossary reload`.
 
 ## License
