@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-glossary",
+  "description": "Lazy-loaded glossary definitions for Claude Code",
+  "owner": {
+    "name": "Ronie Uliana"
+  },
+  "plugins": [
+    {
+      "name": "glossary",
+      "description": "Injects glossary definitions into the prompt context when your prompt mentions matching terms.",
+      "author": {
+        "name": "Ronie Uliana"
+      },
+      "category": "productivity",
+      "source": "./"
+    }
+  ]
+}

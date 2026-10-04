@@ -1,0 +1,15 @@
+// The default global glossary, written to ~/.claude/glossary.json the first time
+// the plugin runs (see register.tsx). It documents the plugin itself.
+
+import type { GlossaryEntry } from './glossary';
+
+export const DEFAULT_GLOSSARY: GlossaryEntry[] = [
+	{
+		"term": "claude-glossary",
+		"definition": "claude-glossary is a Claude Code plugin that lazy-loads glossary definitions into the agent context when user prompts mention matching terms.\n\nIt reads entries from two scopes: global (~/.claude/glossary.json or .jsonl) and project (.claude/glossary.json or .jsonl). Project entries take priority over global entries when the same term appears in both.\n\nWithin a single file, entries listed first (top) take priority over entries listed later. Any entry can be replaced by an include directive — `{\"include\": \"path_or_url\"}` — which inlines entries from another local file or URL at that position. Includes support local paths, plain URLs, and GitHub URLs (raw files and gists, public or private). Browser-visible GitHub file URLs (the /blob/ form) are accepted and converted automatically.\n\nSee [[claude-glossary schema]] for the full entry format."
+	},
+	{
+		"term": "claude-glossary schema",
+		"definition": "A glossary file (JSON or JSONL) contains a list of entries. Each item is either a term definition or an include directive.\n\n**Include directive** — pulls in entries from another source at this position:\n`{ \"include\": \"path_or_url\" }`\nAccepted values: relative or absolute local paths (with or without .json/.jsonl extension), plain HTTPS URLs, GitHub file URLs (github.com/…/blob/…), GitHub raw URLs, and gist URLs.\n\n**Term definition** — required fields: `term` (non-empty string, the canonical handle) and `definition` (non-empty string injected when matched; may contain `{{shell command}}` placeholders expanded at injection time). Optional fields: `aliases` (array of strings for additional match triggers), `pattern` (custom regex that overrides the default term/alias matcher), `flags` (regex flags, default `iu`), `enabled` (boolean; set `false` to disable without deleting), `source` (provenance label shown in the glossary browser).\n\nJSON Schema shape for a term entry: `{ \"type\": \"object\", \"required\": [\"term\", \"definition\"], \"properties\": { \"term\": { \"type\": \"string\", \"minLength\": 1 }, \"definition\": { \"type\": \"string\", \"minLength\": 1 }, \"aliases\": { \"type\": \"array\", \"items\": { \"type\": \"string\" } }, \"pattern\": { \"type\": \"string\" }, \"flags\": { \"type\": \"string\", \"default\": \"iu\" }, \"enabled\": { \"type\": \"boolean\" }, \"source\": { \"type\": \"string\" } } }`."
+	}
+];

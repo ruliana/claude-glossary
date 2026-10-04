@@ -1,0 +1,9 @@
+{
+	"name": "glossary",
+	"version": "0.1.0",
+	"description": "Lazy-loads project glossary definitions into the agent context when your prompts mention matching terms.",
+	"author": { "name": "Ronie Uliana" },
+	"license": "MIT",
+	"repository": "https://github.com/ruliana/claude-glossary",
+	"types": "./types/index.d.ts"
+}
