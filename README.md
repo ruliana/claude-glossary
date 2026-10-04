@@ -216,7 +216,8 @@ When multiple entries match the same prompt, all matching entries are considered
 
 | Command | Description |
 |---------|-------------|
-| `/glossary` | Open an interactive glossary browser pane (type to search, Tab to move between terms, Esc to close; if typing lands in the prompt box, press ctrl+x tab to focus the pane). Under `claude -p`, where no pane can be drawn, it prints the term list instead |
+| `/glossary` | Open an interactive glossary browser pane (type to search, Tab to move between terms). Running it again while the pane is open closes it. Under `claude -p`, where no pane can be drawn, it prints the term list instead |
+| `/glossary close` | Close the browser pane. Esc also closes it, but only while the pane has the keyboard or the prompt is idle and empty; otherwise use this, `/glossary` again, or the pane's **Close** button |
 | `/glossary reload` | Reload `~/.claude/glossary.json` or `~/.claude/glossary.jsonl`, and `.claude/glossary.json` or `.claude/glossary.jsonl`, without restarting Claude Code. Also resets the session's loaded terms |
 
 ## Notes

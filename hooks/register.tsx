@@ -139,7 +139,7 @@ export const register: Register = (on) => {
 		await $.command.register({
 			name: 'glossary',
 			description: 'Browse or reload the glossary',
-			argumentHint: '[reload]',
+			argumentHint: '[reload|close]',
 		});
 		await $.tool.register({
 			name: 'lookup',
@@ -233,7 +233,16 @@ export const register: Register = (on) => {
 
 	on('command.run', { command: 'glossary' }, async ($, e) => {
 		const arg = e.args.trim();
-		if (arg && arg !== 'reload') return { text: 'Usage: /glossary or /glossary reload' };
+		if (arg && arg !== 'reload' && arg !== 'close') return { text: 'Usage: /glossary, /glossary reload or /glossary close' };
+
+		// Esc only closes the pane while it holds the keys or the prompt is idle and empty,
+		// so offer a close that always works: `/glossary close`, or `/glossary` again.
+		const isOpen = (await $.ui.panes()).some((p) => p.id === PANE);
+		if (arg === 'close' || (!arg && isOpen)) {
+			if (!isOpen) return { text: 'Glossary browser is not open.' };
+			await $.ui.close({ id: PANE });
+			return { text: 'Glossary browser closed.' };
+		}
 
 		if (arg === 'reload') {
 			await resetLoaded($);
@@ -263,7 +272,7 @@ export const register: Register = (on) => {
 		const rows = Math.min(entries.length, 30) + 3;
 		const opened = await $.ui.open({ id: PANE, title: 'Glossary', focus: true, closeOnEscape: true, rows });
 		// Where no surface draws the pane (a -p run, a narrow terminal), list instead.
-		return opened.isPlaced ? { text: 'Glossary browser opened (Esc closes).' } : { text: listing(entries) };
+		return opened.isPlaced ? { text: 'Glossary browser opened (Esc or /glossary close closes it).' } : { text: listing(entries) };
 	});
 
 	// Arrow keys / Tab walk the term buttons; the focused one is the selection.
@@ -312,18 +321,23 @@ export const register: Register = (on) => {
 
 		return (
 			<Box flexDirection="column">
-				<Input
-					key="query"
-					label="Search"
-					placeholder="filter terms, aliases, definitions"
-					value={query}
-					autoFocus
-					onInput={(value) => {
-						void update($, queryState, () => value);
-						void update($, selectedState, () => null);
-					}}
-					onSubmit={() => {}}
-				/>
+				<Box flexDirection="row">
+					<Box flexGrow={1}>
+						<Input
+							key="query"
+							label="Search"
+							placeholder="filter terms, aliases, definitions"
+							value={query}
+							autoFocus
+							onInput={(value) => {
+								void update($, queryState, () => value);
+								void update($, selectedState, () => null);
+							}}
+							onSubmit={() => {}}
+						/>
+					</Box>
+					<Button key="close" role="dismiss" label="Close" onPress={() => $.ui.close({ id: PANE })} />
+				</Box>
 				<Box flexDirection="row">
 					<Box flexDirection="column" width="38%">
 						{shown.length === 0 && <Text dimColor>No matches.</Text>}
@@ -343,7 +357,7 @@ export const register: Register = (on) => {
 						{details}
 					</Box>
 				</Box>
-				<Text dimColor>Tab: select · type to filter · Esc: close</Text>
+				<Text dimColor>Tab: select · type to filter · Esc or /glossary close: close</Text>
 			</Box>
 		);
 	});

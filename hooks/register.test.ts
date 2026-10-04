@@ -21,6 +21,8 @@ type World = {
 	opened: string[];
 	isPlaced: boolean;
 	surfaces: RenderSurface[];
+	/** Panes currently open (ids). */
+	panes: string[];
 };
 
 /** Stand in for the engine beneath the plugin: fs, process, http, ui nouns, and the session's own echoes. */
@@ -32,6 +34,7 @@ function world(on: On, files: Record<string, string> = { [GLOBAL]: JSON.stringif
 		commands: [],
 		tools: [],
 		opened: [],
+		panes: [],
 		isPlaced: true,
 		surfaces: ['terminal'],
 	};
@@ -67,7 +70,13 @@ function world(on: On, files: Record<string, string> = { [GLOBAL]: JSON.stringif
 	});
 	on('ui.open', (_$, e) => {
 		w.opened.push(e.id);
+		if (w.isPlaced && !w.panes.includes(e.id)) w.panes.push(e.id);
 		return { value: w.isPlaced ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'narrow' } };
+	});
+	on('ui.panes', () => ({ value: w.panes.map((id) => ({ id, title: id })) }) as never);
+	on('ui.close', (_$, e) => {
+		w.panes = w.panes.filter((id) => id !== e.id);
+		return { value: undefined } as never;
 	});
 	on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }));
 	on('session.start', (_$, e) => ({ cwd: e.cwd }));
@@ -184,7 +193,18 @@ test('/glossary opens the pane, lists when no surface draws it, and shows usage 
 	const opened = await runCommand($, '');
 	expect(w.opened).toEqual(['glossary']);
 	expect(opened.text).toContain('browser');
+	expect(w.panes).toEqual(['glossary']);
 
+	// /glossary again toggles it closed; /glossary close closes it, and says so when it is not open
+	const toggled = await runCommand($, '');
+	expect(toggled.text).toContain('closed');
+	expect(w.panes).toEqual([]);
+	await runCommand($, '');
+	expect((await runCommand($, 'close')).text).toContain('closed');
+	expect(w.panes).toEqual([]);
+	expect((await runCommand($, 'close')).text).toContain('not open');
+
+	w.opened.length = 0;
 	w.isPlaced = false;
 	const listed = await runCommand($, '');
 	expect(listed.text).toContain('- widget (gizmo)');
