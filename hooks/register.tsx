@@ -11,12 +11,16 @@ import {
 	loadGlossary,
 	matchEntries,
 	matchRanges,
+	PROJECT_SHELL_DISABLED_MARKER,
+	projectGlossaryBase,
 } from './glossary';
-import type { CompiledEntry, GlossaryIO, LoadResult } from './glossary';
+import type { CompiledEntry, GlossaryIO, LoadResult, ProjectTrust } from './glossary';
 
 const PANE = 'glossary';
 const TOOL = 'mcp__glossary__lookup';
 const DEFAULT_OFFERED_KEY = 'defaultGlossaryOffered';
+/** `$.store` key: project glossary path -> digest the user approved with `/glossary trust`. */
+const TRUSTED_PROJECTS_KEY = 'trustedProjects';
 
 // State a drawing or a reload must see lives in `$.state` (it survives a hot
 // reload of this module). Compiled entries hold RegExps, which are not plain
@@ -37,8 +41,25 @@ const plural = (n: number) => `${n} entr${n === 1 ? 'y' : 'ies'}`;
 const sources = (files: string[]) => (files.length === 0 ? '' : ` from ${files.join(' and ')}`);
 
 let entries: CompiledEntry[] = [];
+let project: ProjectTrust | undefined;
 let home = '';
 let cwd = '';
+
+async function trustedProjects($: EngineInterface): Promise<Record<string, string>> {
+	const value = await $.store.get(TRUSTED_PROJECTS_KEY);
+	return value && typeof value === 'object' ? (value as Record<string, string>) : {};
+}
+
+const PROJECT_APPROVAL_HINT =
+	'.claude/glossary has shell templates, which stay off until you review it and run /glossary trust';
+
+/** Expand an entry's templates; an untrusted project entry says how to turn them on. */
+function expand(io: GlossaryIO, entry: CompiledEntry, dir: string): Promise<string> {
+	return expandTemplate(io, entry.definition, dir, {
+		allowShell: entry.allowShell === true,
+		disabledMarker: entry.origin === 'project' ? PROJECT_SHELL_DISABLED_MARKER : undefined,
+	});
+}
 
 function makeIO($: EngineInterface): GlossaryIO {
 	return {
@@ -92,8 +113,13 @@ async function resetLoaded($: EngineInterface) {
 async function load($: EngineInterface): Promise<LoadResult> {
 	home = (await $.env.get('HOME')) ?? home;
 	cwd = await $.session.cwd();
-	const result = await loadGlossary(makeIO($), { home, cwd });
+	const approved = await trustedProjects($);
+	const base = projectGlossaryBase(cwd);
+	const projectFiles = [`${base}.json`, `${base}.jsonl`];
+	const trustedProjectDigest = projectFiles.map((f) => approved[f]).find((d) => d !== undefined);
+	const result = await loadGlossary(makeIO($), { home, cwd, trustedProjectDigest });
 	entries = result.entries;
+	project = result.project;
 	await update($, entriesState, () =>
 		entries.map((e) => ({
 			term: e.term,
@@ -139,7 +165,7 @@ export const register: Register = (on) => {
 		await $.command.register({
 			name: 'glossary',
 			description: 'Browse or reload the glossary',
-			argumentHint: '[reload|close]',
+			argumentHint: '[reload|close|trust|untrust]',
 		});
 		await $.tool.register({
 			name: 'lookup',
@@ -158,6 +184,7 @@ export const register: Register = (on) => {
 			$.ui.toast(`Glossary load failed: ${result.error}`);
 		} else if (!wasLoaded) {
 			for (const w of result.warnings) $.ui.toast(`Glossary warning: ${w}`);
+			if (result.project?.needsApproval) $.ui.toast(`Glossary: ${PROJECT_APPROVAL_HINT}`);
 			if (result.files.length > 0 && result.entries.length > 0) {
 				$.ui.toast(`Glossary loaded: ${plural(result.entries.length)}${sources(result.files)}`);
 			}
@@ -182,7 +209,7 @@ export const register: Register = (on) => {
 			const dir = cwd || (await $.session.cwd());
 			const io = makeIO($);
 			const expanded = await Promise.all(
-				matched.map(async (entry) => ({ ...entry, definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }) })),
+				matched.map(async (entry) => ({ ...entry, definition: await expand(io, entry, dir) })),
 			);
 			const hasPreamble = await read($, preambleState);
 			const block = buildContextBlock(expanded, { includePreamble: !hasPreamble, toolName: TOOL });
@@ -201,9 +228,7 @@ export const register: Register = (on) => {
 		const entry = findTerm(entries, term) ?? matchEntries(entries, term)[0];
 		if (!entry) return { result: `Glossary term not found: "${term}"` };
 		if (!(await read($, loadedState)).includes(entry.term)) await markLoaded($, [entry.term]);
-		const definition = await expandTemplate(makeIO($), entry.definition, cwd || (await $.session.cwd()), {
-			allowShell: entry.allowShell === true,
-		});
+		const definition = await expand(makeIO($), entry, cwd || (await $.session.cwd()));
 		return { result: `### \`${entry.term}\`\n${definition}` };
 	});
 
@@ -235,7 +260,26 @@ export const register: Register = (on) => {
 
 	on('command.run', { command: 'glossary' }, async ($, e) => {
 		const arg = e.args.trim();
-		if (arg && arg !== 'reload' && arg !== 'close') return { text: 'Usage: /glossary, /glossary reload or /glossary close' };
+		if (arg && !['reload', 'close', 'trust', 'untrust'].includes(arg)) {
+			return { text: 'Usage: /glossary, /glossary reload, /glossary close, /glossary trust or /glossary untrust' };
+		}
+
+		if (arg === 'trust' || arg === 'untrust') {
+			// Reload first so the approval covers what is on disk now, not what was loaded earlier.
+			await load($);
+			if (!project) return { text: 'No project glossary to trust in this directory.' };
+			const approved = await trustedProjects($);
+			if (arg === 'trust') approved[project.file] = project.digest;
+			else delete approved[project.file];
+			await $.store.set(TRUSTED_PROJECTS_KEY, approved);
+			await load($);
+			const text =
+				arg === 'trust'
+					? `Glossary: shell templates enabled for ${project.file}. Any change to it, or to a local file it includes, turns them off until you trust it again.`
+					: `Glossary: shell templates disabled for ${project.file}.`;
+			$.ui.toast(text);
+			return { text };
+		}
 
 		// Esc only closes the pane while it holds the keys or the prompt is idle and empty,
 		// so offer a close that always works: `/glossary close`, or `/glossary` again.
@@ -254,6 +298,7 @@ export const register: Register = (on) => {
 				return { text: `Glossary reload failed: ${result.error}` };
 			}
 			for (const w of result.warnings) $.ui.toast(`Glossary warning: ${w}`);
+			if (result.project?.needsApproval) $.ui.toast(`Glossary: ${PROJECT_APPROVAL_HINT}`);
 			const text =
 				result.files.length > 0
 					? `Glossary reloaded: ${plural(result.entries.length)}${sources(result.files)}`

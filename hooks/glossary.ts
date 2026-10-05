@@ -46,6 +46,19 @@ export type LoadResult = {
 	warnings: string[];
 	/** Fatal load error (bad JSON, invalid entry, ambiguous .json+.jsonl); entries is [] when set. */
 	error?: string;
+	/** The project glossary, when one exists. */
+	project?: ProjectTrust;
+};
+
+export type ProjectTrust = {
+	/** Absolute path of the project glossary file. */
+	file: string;
+	/** SHA-256 of every local file read for the project glossary (paths and contents). */
+	digest: string;
+	/** The user approved exactly this digest, so the project's shell templates run. */
+	trusted: boolean;
+	/** The project has shell templates that stay off until the user approves it. */
+	needsApproval: boolean;
 };
 
 export const GLOSSARY_HEADING = "## Glossary";
@@ -167,6 +180,7 @@ function extractRefs(definition: string): string[] {
 }
 
 export const SHELL_DISABLED_MARKER = "[shell template disabled: remote glossary source]";
+export const PROJECT_SHELL_DISABLED_MARKER = "[shell template disabled: project glossary not trusted, run /glossary trust]";
 
 /**
  * Expand `{{cmd}}` placeholders; each distinct command runs once; failures become `[error: msg]`.
@@ -176,12 +190,12 @@ export async function expandTemplate(
 	io: GlossaryIO,
 	definition: string,
 	cwd: string,
-	opts: { allowShell: boolean },
+	opts: { allowShell: boolean; disabledMarker?: string },
 ): Promise<string> {
 	if (!definition.includes("{{")) return definition;
 	const matches = [...definition.matchAll(/\{\{(.+?)\}\}/g)];
 	if (matches.length === 0) return definition;
-	if (!opts.allowShell) return definition.replace(/\{\{(.+?)\}\}/g, SHELL_DISABLED_MARKER);
+	if (!opts.allowShell) return definition.replace(/\{\{(.+?)\}\}/g, () => opts.disabledMarker ?? SHELL_DISABLED_MARKER);
 
 	const results = new Map<string, string>();
 	for (const match of matches) {
@@ -231,6 +245,11 @@ export function filterEntries(entries: CompiledEntry[], query: string): Compiled
 }
 
 // --- Loading ---
+
+async function sha256(text: string): Promise<string> {
+	const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+	return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 function describeGlossaryEntry(entry: Partial<GlossaryEntry>, index: number): string {
 	const term = typeof entry.term === "string" ? entry.term.trim() : "";
@@ -443,15 +462,39 @@ async function loadGlossaryFile(file: string, ctx: Ctx): Promise<LoadedFile> {
  * Load global then project glossary, resolve includes, validate, merge
  * (first entry in a file wins; project overrides global by `term`), compile matchers.
  * Never throws: failures go to `error` / `warnings`.
+ *
+ * The project glossary comes with the repository, so its shell templates (and any
+ * `allowShell` it grants to a URL include) only run when `trustedProjectDigest` matches
+ * the digest of every local file it read; any edit to those files needs a new approval.
  */
-export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: string }): Promise<LoadResult> {
+export async function loadGlossary(
+	io: GlossaryIO,
+	opts: { home: string; cwd: string; trustedProjectDigest?: string },
+): Promise<LoadResult> {
 	const warnings: string[] = [];
 	try {
 		const ctx: Omit<Ctx, "origin"> = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true };
 		const globalFile = await resolveGlossaryFile(io, globalGlossaryBase(opts.home));
 		const projectFile = await resolveGlossaryFile(io, projectGlossaryBase(opts.cwd));
 		const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
-		const projectResult = await loadGlossaryFile(projectFile, { ...ctx, origin: "project" });
+		const projectReads: Array<[string, string | null]> = [];
+		const projectIO: GlossaryIO = {
+			...io,
+			readFile: async (path) => {
+				const text = await io.readFile(path);
+				projectReads.push([path, text ?? null]);
+				return text;
+			},
+		};
+		const projectResult = await loadGlossaryFile(projectFile, { ...ctx, io: projectIO, origin: "project" });
+		let project: ProjectTrust | undefined;
+		if (projectResult.found) {
+			const digest = await sha256(JSON.stringify(projectReads));
+			const trusted = opts.trustedProjectDigest === digest;
+			const hasShell = projectResult.entries.some((e) => e.allowShell && /\{\{(.+?)\}\}/.test(e.definition));
+			project = { file: projectFile, digest, trusted, needsApproval: hasShell && !trusted };
+			if (!trusted) projectResult.entries = projectResult.entries.map((e) => ({ ...e, allowShell: false }));
+		}
 
 		// Merge in reverse so first entry in each file wins; project overrides global.
 		// First occurrence wins: project before global, top of each file before bottom.
@@ -470,7 +513,7 @@ export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: st
 		});
 
 		const files = [globalResult, projectResult].filter((r) => r.found).map((r) => r.label ?? r.path);
-		return { entries, files, warnings };
+		return { entries, files, warnings, project };
 	} catch (error) {
 		return { entries: [], files: [], warnings, error: errMessage(error) };
 	}

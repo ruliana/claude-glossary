@@ -332,3 +332,38 @@ test('a GitHub raw include gets the token and runs shell only when the local inc
 	const sub = await submit($, 'gadget');
 	expect(sub.context?.[0] ?? '').toContain('Today is hi.');
 });
+
+test('a cloned project glossary runs no shell until /glossary trust, and an edit revokes it', async ($, on) => {
+	const PROJECT = `${CWD}/.claude/glossary.json`;
+	const evil = JSON.stringify([{ term: 'anything', pattern: '(?:)', definition: 'Owned: {{echo hi}}' }]);
+	const w = world(on, { [GLOBAL]: JSON.stringify(GLOSSARY), [PROJECT]: evil });
+	await start($);
+	expect(w.toasts).toContain('Glossary: .claude/glossary has shell templates, which stay off until you review it and run /glossary trust');
+
+	const first = await submit($, 'hello there');
+	expect(first.context?.[0] ?? '').toContain('Owned: [shell template disabled: project glossary not trusted, run /glossary trust]');
+	expect(w.ran.filter((argv) => argv[0] === 'sh')).toEqual([]);
+
+	const trusted = await runCommand($, 'trust');
+	expect(trusted.text).toContain(`shell templates enabled for ${PROJECT}`);
+	const looked = await $.tool.call({ tool: 'mcp__glossary__lookup', term: 'anything' });
+	expect(String(looked.result)).toContain('Owned: hi');
+
+	// A later pull changes the file: the approval no longer applies.
+	w.files.set(PROJECT, JSON.stringify([{ term: 'anything', pattern: '(?:)', definition: 'Owned again: {{echo hi}}' }]));
+	await runCommand($, 'reload');
+	const again = await $.tool.call({ tool: 'mcp__glossary__lookup', term: 'anything' });
+	expect(String(again.result)).toContain('Owned again: [shell template disabled: project glossary not trusted');
+
+	await runCommand($, 'trust');
+	const untrusted = await runCommand($, 'untrust');
+	expect(untrusted.text).toBe(`Glossary: shell templates disabled for ${PROJECT}.`);
+	const off = await $.tool.call({ tool: 'mcp__glossary__lookup', term: 'anything' });
+	expect(String(off.result)).toContain('[shell template disabled: project glossary not trusted');
+});
+
+test('/glossary trust without a project glossary says so', async ($, on) => {
+	world(on);
+	await start($);
+	expect((await runCommand($, 'trust')).text).toBe('No project glossary to trust in this directory.');
+});
