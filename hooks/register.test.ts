@@ -29,6 +29,8 @@ type World = {
 	ran: string[][];
 	/** Modification times by path; `edit` bumps them. */
 	mtimes: Map<string, number>;
+	/** Prompts subagents were started with. */
+	spawned: string[];
 };
 
 /** Change a file the way an editor would: new text, newer mtime. `undefined` deletes it. */
@@ -58,6 +60,7 @@ function world(
 		fetched: [],
 		ran: [],
 		mtimes: new Map(),
+		spawned: [],
 	};
 	mock.env(on, { HOME, ...opts.env });
 	mock.store(on);
@@ -111,6 +114,10 @@ function world(
 		return { value: undefined } as never;
 	});
 	on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }));
+	on('agent.spawn', (_$, e) => {
+		w.spawned.push(e.prompt);
+		return { model: 'test-model', agentId: 'a1' };
+	});
 	on('session.start', (_$, e) => ({ cwd: e.cwd }));
 	on('session.end', () => ({ value: undefined }) as never);
 	return w;
@@ -407,4 +414,41 @@ test('a glossary broken mid-edit keeps the previous one until it is fixed', asyn
 
 	edit(w, GLOBAL, JSON.stringify([{ term: 'widget', definition: 'Fixed widget.' }]));
 	expect((await submit($, 'widget')).context?.[0]).toContain('Fixed widget.');
+});
+
+/** Spawn a subagent through the plugin and return the prompt the engine beneath received. */
+async function spawn($: Engine, w: World, prompt: string, extra: Record<string, unknown> = {}): Promise<string> {
+	await $.agent.spawn({
+		tool_use_id: 't1',
+		prompt,
+		description: 'task',
+		subagentType: 'general-purpose',
+		provider: { plugin: 'engine', tier: 'core' },
+		parentModel: 'test-model',
+		background: false,
+		fork: false,
+		...extra,
+	} as never);
+	return w.spawned[w.spawned.length - 1] ?? '';
+}
+
+test('a subagent gets the definitions its task mentions, even ones already loaded here', async ($, on) => {
+	const w = world(on);
+	await start($);
+	await submit($, 'widget');
+	const prompt = await spawn($, w, 'Refactor the widget and the sprocket.');
+	expect(prompt.startsWith('Refactor the widget and the sprocket.\n\n## Glossary\n')).toBe(true);
+	expect(prompt).toContain('The task you were given referenced');
+	expect(prompt).toContain('### `widget`');
+	expect(prompt).toContain('Today is hi.');
+	expect(prompt).not.toContain('### `flange`');
+	// The subagent's injection does not count as loaded in this conversation.
+	expect(lastStatus(w)).toBe('Glossary: widget');
+});
+
+test('a subagent task with no glossary terms, or a fork, is left as is', async ($, on) => {
+	const w = world(on);
+	await start($);
+	expect(await spawn($, w, 'Run the tests.')).toBe('Run the tests.');
+	expect(await spawn($, w, 'Check the widget.', { fork: true })).toBe('Check the widget.');
 });

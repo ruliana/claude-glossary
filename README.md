@@ -20,7 +20,8 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 6. Loaded terms stay visible for the rest of the session in the status line as `Glossary: term, term`.
 7. Matched terms are highlighted live in the prompt box as you type.
 8. After a context compaction or a `/clear`, loaded terms are reset, so they are re-injected when mentioned again.
-9. When you edit, create or delete a glossary file (or a local file it includes), the plugin notices on your next prompt and reloads by itself. Loaded terms whose definition changed are re-injected the next time they are mentioned; unchanged terms stay loaded.
+9. When Claude starts a subagent (the Agent tool), the subagent's task is scanned the same way, and the definitions it mentions are appended to the task. A subagent starts with an empty context, so it gets them even when they are already loaded in your conversation. Forks inherit your conversation, glossary included, so they get nothing extra.
+10. When you edit, create or delete a glossary file (or a local file it includes), the plugin notices on your next prompt and reloads by itself. Loaded terms whose definition changed are re-injected the next time they are mentioned; unchanged terms stay loaded.
 
 ## What It Does
 
@@ -34,6 +35,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 - Highlights matched terms live in the prompt box
 - Shows loaded terms in the status line for the whole session
 - Provides an `mcp__glossary__lookup` tool for `[[term]]` cross-references
+- Shares matching definitions with subagents whose task mentions them
 - Avoids re-appending glossary entries that were already loaded earlier in the session
 
 ## Installation
@@ -233,6 +235,7 @@ When multiple entries match the same prompt, all matching entries are considered
 
 - Glossary data can be global (`~/.claude/glossary.json` or `~/.claude/glossary.jsonl`) or project-scoped (`.claude/glossary.json` or `.claude/glossary.jsonl`).
 - Nothing is injected when the prompt does not mention a glossary handle.
+- Subagent tasks are written by Claude, not typed by you, so what a subagent receives depends on the words Claude used. Shell templates expand for subagents with the same rules as for your prompts.
 - Once a term is loaded in a session, mentioning it again does not inject it again (until a compaction, a `/clear`, or `/glossary reload`).
 - Edits to glossary files reload automatically on your next prompt (or the next `/glossary` or lookup). The plugin compares the modification time and size of every local file it read, so the check costs a few `stat` calls per prompt.
 - If an edit leaves a file invalid (half-saved JSON, say), the plugin shows the error once and keeps using the previous glossary until the file is fixed.

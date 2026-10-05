@@ -12,6 +12,7 @@ import {
 	loadGlossary,
 	matchEntries,
 	matchRanges,
+	SUBAGENT_PREAMBLE,
 } from './glossary';
 import type { CompiledEntry, GlossaryIO, LoadResult } from './glossary';
 
@@ -176,6 +177,18 @@ async function installDefault($: EngineInterface) {
 	$.ui.toast(`Glossary: wrote a default glossary to ~/.claude/glossary.json`);
 };
 
+/** The entries with their `{{...}}` templates expanded, as each entry's trust allows. */
+async function expandAll($: EngineInterface, list: CompiledEntry[]): Promise<CompiledEntry[]> {
+	const dir = cwd || (await $.session.cwd());
+	const io = makeIO($);
+	return Promise.all(
+		list.map(async (entry) => ({
+			...entry,
+			definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }),
+		})),
+	);
+};
+
 export const register: Register = (on) => {
 	on('session.start', async ($, e, next) => {
 		home = (await $.env.get('HOME')) ?? '';
@@ -235,11 +248,7 @@ export const register: Register = (on) => {
 			const matched = matchEntries(entries, e.text, loaded);
 			if (matched.length === 0) return next(e);
 
-			const dir = cwd || (await $.session.cwd());
-			const io = makeIO($);
-			const expanded = await Promise.all(
-				matched.map(async (entry) => ({ ...entry, definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }) })),
-			);
+			const expanded = await expandAll($, matched);
 			const hasPreamble = await read($, preambleState);
 			const block = buildContextBlock(expanded, { includePreamble: !hasPreamble, toolName: TOOL });
 			await update($, preambleState, () => true);
@@ -250,6 +259,31 @@ export const register: Register = (on) => {
 			$.ui.log(`glossary: prompt injection failed: ${error instanceof Error ? error.message : error}`, { to: 'debug' });
 			return next(e);
 		}
+	});
+
+	// A subagent starts with a fresh context: none of the definitions injected
+	// into this conversation reach it. Hand it the ones its task mentions, every
+	// time (each subagent's context is its own), without marking them loaded
+	// here. A fork inherits this conversation, glossary included, so it gets none.
+	on('agent.spawn', async ($, e, next) => {
+		if (e.fork) return next(e);
+		let prompt = e.prompt;
+		try {
+			await reloadIfChanged($);
+			const matched = matchEntries(entries, e.prompt);
+			if (matched.length > 0) {
+				const block = buildContextBlock(await expandAll($, matched), {
+					includePreamble: true,
+					preamble: SUBAGENT_PREAMBLE,
+					toolName: TOOL,
+				});
+				prompt = `${e.prompt}\n\n${block}`;
+			}
+		} catch (error) {
+			// Never block a subagent over the glossary.
+			$.ui.log(`glossary: subagent injection failed: ${error instanceof Error ? error.message : error}`, { to: 'debug' });
+		}
+		return prompt === e.prompt ? next(e) : next({ ...e, prompt });
 	});
 
 	on('tool.call', { tool: TOOL }, async ($, e) => {
