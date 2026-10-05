@@ -199,7 +199,7 @@ Each enabled entry must have:
 - a non-empty `definition`
 - a valid regex `pattern` if `pattern` is provided
 
-If validation fails, `/glossary` and `/glossary reload` show an actionable error that identifies the bad entry.
+If validation fails, `/glossary` and `/glossary reload` show an actionable error that identifies the bad entry. An entry from a URL include whose `pattern` or `flags` do not compile is skipped with a warning instead, so a broken remote glossary cannot switch off the rest of yours.
 
 ## Matching Behavior
 

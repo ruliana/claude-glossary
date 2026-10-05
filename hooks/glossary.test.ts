@@ -168,6 +168,17 @@ describe('loading', () => {
 		expect(await bad({ term: 't', definition: 'd', flags: 1 })).toMatch(/flags must be a string/)
 		expect(await bad({ term: 't', definition: 'd', pattern: '(' })).toMatch(/^Invalid glossary entry 1 \(term: t\): /)
 	})
+	test('a bad regex from a URL include drops only that entry', async () => {
+		const R = 'https://example.com/r.json'
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R }]) },
+			{ [R]: j([{ term: 'bad', definition: 'B', pattern: '(' }, { term: 'good', definition: 'G' }, { term: 'badflags', definition: 'F', flags: 'zz' }]) },
+		))
+		expect(r.error).toBeUndefined()
+		expect(r.entries.map((e) => e.term)).toEqual(['mine', 'good'])
+		expect(r.warnings).toHaveLength(2)
+		expect(r.warnings[0]).toMatch(/^Skipping invalid glossary entry 2 \(term: bad\): .* \(from https:\/\/example\.com\/r\.json\)$/)
+	})
 	test('enabled:false is skipped', async () => {
 		const r = await load(fakeIO({ [`${P}.json`]: j([{ term: 'a', definition: 'A', enabled: false }, { term: 'b', definition: 'B' }]) }))
 		expect(r.entries.map((e) => e.term)).toEqual(['b'])
