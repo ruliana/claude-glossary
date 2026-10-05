@@ -143,7 +143,7 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 **Rules:**
 - Circular includes (A includes B which includes A) are detected and skipped with a warning.
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
-- Included files may themselves contain `include` directives (recursive).
+- Included files may themselves contain `include` directives (recursive). Inside a glossary that came from a URL, only `https` URLs on public hosts may be included: a remote glossary cannot include your local files, `http` URLs, `localhost`, or private and link-local addresses (such as `192.168.x.x` or `169.254.169.254`). Those includes are skipped with a warning. Host names are not resolved, so this does not stop a public name that points at a private address.
 - Relative local paths resolve against the project directory (where Claude Code was started), not against the file that contains the include. This applies to includes in the global glossary and in nested includes too, so prefer absolute paths there.
 - GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https` and only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`; every other URL is fetched without it.
 - Entries from a URL include cannot run [shell command templates](#shell-command-templates) unless the include opts in with `"allowShell": true` (see below).

@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'claude-code/testing'
 import {
 	buildContextBlock, buildMatcher, expandTemplate, filterEntries, findTerm, formatEntry,
-	globalGlossaryBase, isGitHubUrl, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
+	globalGlossaryBase, isGitHubUrl, isPrivateHost, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
 	GLOSSARY_HEADING, GLOSSARY_PREAMBLE,
 } from './glossary'
 import type { CompiledEntry, GlossaryEntry, GlossaryIO } from './glossary'
@@ -428,12 +428,12 @@ describe('shell template trust', () => {
 				[`${CWD}/local.json`]: j([{ term: 'l', definition: '{{id}}' }]),
 			},
 			{
-				[R]: j([{ include: R2, allowShell: true }, { include: 'local.json' }]),
+				[R]: j([{ include: R2, allowShell: true }]),
 				[R2]: j([{ term: 'r2', definition: '{{id}}' }]),
 			},
 		))
 		expect(r.warnings).toEqual([])
-		expect(shellOf(r)).toEqual({ r2: false, l: false })
+		expect(shellOf(r)).toEqual({ r2: false })
 	})
 })
 
@@ -450,11 +450,58 @@ describe('entry origin', () => {
 		))
 		expect(Object.fromEntries(r.entries.map((e) => [e.term, e.origin]))).toEqual({ p: 'project', r: 'remote', g: 'global', gm: 'global' })
 	})
-	test('a local file included below a remote include is remote', async () => {
+	test('a URL included below a remote include is remote', async () => {
+		const R2 = 'https://example.com/r2.json'
 		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R }]), [`${CWD}/local.json`]: j([{ term: 'l', definition: 'L' }]) },
-			{ [R]: j([{ include: 'local.json' }]) },
+			{ [`${P}.json`]: j([{ include: R }]) },
+			{ [R]: j([{ include: R2 }]), [R2]: j([{ term: 'r2', definition: 'R2' }]) },
 		))
 		expect(r.entries[0]!.origin).toBe('remote')
+	})
+})
+
+describe('includes inside a remote glossary', () => {
+	const R = 'https://example.com/r.json'
+	test('cannot read local files, use http, or reach private hosts', async () => {
+		const io = fakeIO(
+			{
+				[`${G}.json`]: j([{ include: R }]),
+				'/home/u/notes.json': j([{ term: 'n', definition: 'private' }]),
+				[`${CWD}/rel.json`]: j([{ term: 'rel', definition: 'private' }]),
+			},
+			{
+				[R]: j([
+					{ include: '/home/u/notes.json' },
+					{ include: 'rel.json' },
+					{ include: 'http://example.com/plain.json' },
+					{ include: 'https://169.254.169.254/latest/meta-data.json' },
+					{ include: 'https://localhost:8080/x.json' },
+					{ include: 'https://[::1]/x.json' },
+					{ include: 'https://2130706433/x.json' },
+					{ include: 'https://example.com/ok.json' },
+				]),
+				'https://example.com/ok.json': j([{ term: 'ok', definition: 'OK' }]),
+			},
+		)
+		const r = await load(io)
+		expect(r.entries.map((e) => e.term)).toEqual(['ok'])
+		expect(io.fetched.map((f) => f.url)).toEqual([R, 'https://example.com/ok.json'])
+		expect(r.warnings).toHaveLength(7)
+		expect(r.warnings[0]).toBe('Skipping include /home/u/notes.json: a remote glossary cannot include local files')
+	})
+	test('local files and local URLs still work from your own glossary', async () => {
+		const io = fakeIO(
+			{ [`${G}.json`]: j([{ include: '/home/u/notes.json' }, { include: 'http://localhost:9000/g.json' }]), '/home/u/notes.json': j([{ term: 'n', definition: 'N' }]) },
+			{ 'http://localhost:9000/g.json': j([{ term: 'l', definition: 'L' }]) },
+		)
+		const r = await load(io)
+		expect(r.warnings).toEqual([])
+		expect(r.entries.map((e) => e.term)).toEqual(['n', 'l'])
+	})
+	test('isPrivateHost', async () => {
+		for (const h of ['localhost', 'api.localhost', 'printer.local', 'db.internal', '127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '0.0.0.0', '100.64.0.1', '[::1]', '::', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', 'LOCALHOST.'])
+			expect(isPrivateHost(h)).toBe(true)
+		for (const h of ['example.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '2606:4700::1', 'localhost.example.com'])
+			expect(isPrivateHost(h)).toBe(false)
 	})
 })

@@ -336,6 +336,45 @@ export function isGitHubUrl(url: string): boolean {
 	);
 }
 
+/**
+ * True for hosts on the user's own machine or network: localhost, `.local`/`.internal`
+ * names, and loopback, private, link-local (cloud metadata) or unspecified IP literals.
+ * Names are not resolved, so a public name pointing at a private address is not caught.
+ */
+export function isPrivateHost(hostname: string): boolean {
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+	if (host === "localhost" || /\.(localhost|local|internal)$/.test(host)) return true;
+	const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+	if (v4) {
+		const [a, b] = [Number(v4[1]), Number(v4[2])];
+		return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+	}
+	if (host.includes(":")) {
+		const mapped = host.match(/^::ffff:(.+)$/);
+		if (mapped) return mapped[1]!.includes(".") ? isPrivateHost(mapped[1]!) : true;
+		return host === "::" || host === "::1" || /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
+	}
+	return false;
+}
+
+/**
+ * Why an include written inside a remote glossary is refused, or undefined when it is allowed.
+ * A remote glossary may only include https URLs on public hosts: not local files, which would
+ * read the user's disk, nor http or private hosts, which would reach their network.
+ */
+function remoteIncludeRefusal(source: string): string | undefined {
+	if (!isUrl(source)) return "a remote glossary cannot include local files";
+	let url: URL;
+	try {
+		url = new URL(source);
+	} catch {
+		return "invalid URL";
+	}
+	if (url.protocol !== "https:") return "a remote glossary can only include https URLs";
+	if (isPrivateHost(url.hostname)) return "a remote glossary cannot include a local or private network address";
+	return undefined;
+}
+
 /** Convert browser-visible GitHub URLs (/blob/, /raw/, gist raw) to raw-content URLs. */
 function normalizeGitHubUrl(url: string): string {
 	const blobMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/(.+)$/);
@@ -389,6 +428,12 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			const rawSource = item.include.trim();
 			const source = isUrl(rawSource) ? normalizeGitHubUrl(rawSource) : rawSource;
 			const cycleKey = isUrl(source) ? source : resolvePath(ctx.cwd, source);
+
+			const refusal = ctx.origin === "remote" ? remoteIncludeRefusal(source) : undefined;
+			if (refusal) {
+				ctx.warnings.push(`Skipping include ${source}: ${refusal}`);
+				continue;
+			}
 
 			if (ctx.visited.has(cycleKey)) {
 				ctx.warnings.push(`Skipping circular include: ${source}`);
