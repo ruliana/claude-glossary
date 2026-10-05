@@ -357,9 +357,14 @@ function normalizeGitHubUrl(url: string): string {
 	return url;
 }
 
-async function fetchGlossaryUrl(io: GlossaryIO, url: string): Promise<string> {
+/**
+ * `withToken`: the include was written in the user's global glossary (or a local file it
+ * includes). Includes written in a project glossary or below a URL include never get the
+ * token, so a repository or a remote glossary cannot read private GitHub content with it.
+ */
+async function fetchGlossaryUrl(io: GlossaryIO, url: string, withToken: boolean): Promise<string> {
 	const headers: Record<string, string> = {};
-	if (isGitHubUrl(url)) {
+	if (withToken && isGitHubUrl(url)) {
 		const token = await io.githubToken();
 		if (token) headers["Authorization"] = `Bearer ${token}`;
 	}
@@ -405,7 +410,7 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 
 			try {
 				if (isUrl(source)) {
-					const raw = await fetchGlossaryUrl(ctx.io, source);
+					const raw = await fetchGlossaryUrl(ctx.io, source, ctx.origin === "global");
 					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
 					const nested = parseGlossaryFile(raw, pseudoFile);
 					const trusted = ctx.trusted && item.allowShell === true;
