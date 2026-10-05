@@ -273,7 +273,7 @@ describe('includes', () => {
 	test('GitHub blob URL is normalized and gets Bearer token', async () => {
 		const raw = 'https://raw.githubusercontent.com/me/repo/main/dir/g.json'
 		const io = fakeIO(
-			{ [`${P}.json`]: j([{ include: 'https://github.com/me/repo/blob/main/dir/g.json' }]) },
+			{ [`${G}.json`]: j([{ include: 'https://github.com/me/repo/blob/main/dir/g.json' }]) },
 			{ [raw]: j([{ term: 'gh', definition: 'G' }]) },
 			{ token: 'sekret' },
 		)
@@ -363,6 +363,32 @@ describe('GitHub token scope', () => {
 			'http://raw.githubusercontent.com/o/r/main/g.json',
 			'not a url',
 		]) expect(isGitHubUrl(url)).toBe(false)
+	})
+	test('only includes written in the global glossary get the token', async () => {
+		const own = 'https://raw.githubusercontent.com/me/own/main/g.json'
+		const viaProject = 'https://raw.githubusercontent.com/victim/private/main/p.json'
+		const evil = 'https://attacker.invalid/g.json'
+		const viaRemote = 'https://raw.githubusercontent.com/victim/private/main/r.json'
+		const io = fakeIO(
+			{
+				[`${G}.json`]: j([{ include: own }, { include: evil }]),
+				[`${P}.json`]: j([{ include: viaProject }]),
+			},
+			{
+				[own]: j([{ term: 'own', definition: 'O' }]),
+				[evil]: j([{ include: viaRemote }]),
+				[viaRemote]: j([{ term: 'r', definition: 'R' }]),
+				[viaProject]: j([{ term: 'p', definition: 'P' }]),
+			},
+			{ token: 'sekret' },
+		)
+		await load(io)
+		expect(Object.fromEntries(io.fetched.map((f) => [f.url, f.headers]))).toEqual({
+			[own]: { Authorization: 'Bearer sekret' },
+			[evil]: {},
+			[viaRemote]: {},
+			[viaProject]: {},
+		})
 	})
 	test('a lookalike host include is fetched without the token', async () => {
 		const evil = 'https://github.com.attacker.invalid/g.json'
