@@ -23,10 +23,18 @@ type World = {
 	surfaces: RenderSurface[];
 	/** Panes currently open (ids). */
 	panes: string[];
+	/** Remote glossary bodies by URL, and what was fetched / run. */
+	urls: Map<string, string>;
+	fetched: { url: string; headers: Record<string, string> }[];
+	ran: string[][];
 };
 
 /** Stand in for the engine beneath the plugin: fs, process, http, ui nouns, and the session's own echoes. */
-function world(on: On, files: Record<string, string> = { [GLOBAL]: JSON.stringify(GLOSSARY) }): World {
+function world(
+	on: On,
+	files: Record<string, string> = { [GLOBAL]: JSON.stringify(GLOSSARY) },
+	opts: { urls?: Record<string, string>; env?: Record<string, string> } = {},
+): World {
 	const w: World = {
 		files: new Map(Object.entries(files)),
 		statuses: [],
@@ -37,8 +45,11 @@ function world(on: On, files: Record<string, string> = { [GLOBAL]: JSON.stringif
 		panes: [],
 		isPlaced: true,
 		surfaces: ['terminal'],
+		urls: new Map(Object.entries(opts.urls ?? {})),
+		fetched: [],
+		ran: [],
 	};
-	mock.env(on, { HOME });
+	mock.env(on, { HOME, ...opts.env });
 	mock.store(on);
 	on('session.cwd', () => ({ value: CWD }));
 	on('session.surfaces', () => ({ value: w.surfaces }));
@@ -48,7 +59,13 @@ function world(on: On, files: Record<string, string> = { [GLOBAL]: JSON.stringif
 		w.files.set(e.path, e.text);
 		return { value: undefined };
 	});
+	on('http.fetch', (_$, e) => {
+		w.fetched.push({ url: e.url, headers: { ...(e.init?.headers ?? {}) } });
+		const body = w.urls.get(e.url);
+		return { value: { status: body === undefined ? 404 : 200, ok: body !== undefined, headers: {}, text: body ?? '' } } as never;
+	});
 	on('process.run', (_$, e) => {
+		w.ran.push([...e.argv]);
 		const cmd = e.argv[2] ?? '';
 		return { value: { exitCode: 0, stdout: cmd === 'echo hi' ? 'hi' : '', stderr: '' } } as never;
 	});
@@ -277,4 +294,41 @@ test('the pane draws the term list and details, and filters by search', async ($
 		expect(await ui.find({ type: 'Text', text: 'A flange joins pipes.' })).toBeDefined();
 		await ui.unmount();
 	}
+});
+
+test('a remote glossary cannot run shell templates or receive the GitHub token on a lookalike host', async ($, on) => {
+	const remote = 'https://github.com.attacker.invalid/g.json';
+	const w = world(
+		on,
+		{ [GLOBAL]: JSON.stringify([{ include: remote }, ...GLOSSARY]) },
+		{
+			urls: { [remote]: JSON.stringify([{ term: 'gadget', definition: 'Owned: {{touch /tmp/pwned}}', allowShell: true }]) },
+			env: { GITHUB_TOKEN: 'sekret' },
+		},
+	);
+	await start($);
+	expect(w.fetched).toEqual([{ url: remote, headers: {} }]);
+
+	const sub = await submit($, 'gadget sprocket');
+	const block = sub.context?.[0] ?? '';
+	expect(block).toContain('Owned: [shell template disabled: remote glossary source]');
+	// The local entry still expands.
+	expect(block).toContain('Today is hi.');
+
+	const looked = await $.tool.call({ tool: 'mcp__glossary__lookup', term: 'gadget' });
+	expect(String(looked.result)).toContain('[shell template disabled');
+	expect(w.ran.filter((argv) => argv[0] === 'sh')).toEqual([['sh', '-c', 'echo hi']]);
+});
+
+test('a GitHub raw include gets the token and runs shell only when the local include opts in', async ($, on) => {
+	const remote = 'https://raw.githubusercontent.com/o/r/main/g.json';
+	const w = world(
+		on,
+		{ [GLOBAL]: JSON.stringify([{ include: remote, allowShell: true }]) },
+		{ urls: { [remote]: JSON.stringify([{ term: 'gadget', definition: 'Today is {{echo hi}}.' }]) }, env: { GITHUB_TOKEN: 'sekret' } },
+	);
+	await start($);
+	expect(w.fetched).toEqual([{ url: remote, headers: { Authorization: 'Bearer sekret' } }]);
+	const sub = await submit($, 'gadget');
+	expect(sub.context?.[0] ?? '').toContain('Today is hi.');
 });

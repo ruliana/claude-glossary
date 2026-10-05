@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'claude-code/testing'
 import {
 	buildContextBlock, buildMatcher, expandTemplate, filterEntries, findTerm, formatEntry,
-	globalGlossaryBase, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
+	globalGlossaryBase, isGitHubUrl, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
 	GLOSSARY_HEADING, GLOSSARY_PREAMBLE,
 } from './glossary'
 import type { CompiledEntry, GlossaryEntry, GlossaryIO } from './glossary'
@@ -308,17 +308,23 @@ describe('includes', () => {
 describe('templates and formatting', () => {
 	test('no placeholders: untouched, no shell', async () => {
 		const io = fakeIO()
-		expect(await expandTemplate(io, 'plain', CWD)).toBe('plain')
+		expect(await expandTemplate(io, 'plain', CWD, { allowShell: true })).toBe('plain')
 		expect(io.ran).toEqual([])
 	})
 	test('dedups commands and trims output', async () => {
 		const io = fakeIO({}, {}, { shell: { 'echo hi': 'hi' } })
-		expect(await expandTemplate(io, 'a {{echo hi}} b {{ echo hi }}', CWD)).toBe('a hi b hi')
+		expect(await expandTemplate(io, 'a {{echo hi}} b {{ echo hi }}', CWD, { allowShell: true })).toBe('a hi b hi')
 		expect(io.ran).toEqual(['echo hi'])
 	})
 	test('failure becomes error marker', async () => {
 		const io = fakeIO()
-		expect(await expandTemplate(io, 'x {{nope}} y', CWD)).toBe('x [error: not found] y')
+		expect(await expandTemplate(io, 'x {{nope}} y', CWD, { allowShell: true })).toBe('x [error: not found] y')
+	})
+	test('without allowShell nothing runs and placeholders become the disabled marker', async () => {
+		const io = fakeIO({}, {}, { shell: { 'echo hi': 'hi' } })
+		expect(await expandTemplate(io, 'a {{echo hi}} b {{rm -rf ~}}', CWD, { allowShell: false }))
+			.toBe(`a ${SHELL_DISABLED_MARKER} b ${SHELL_DISABLED_MARKER}`)
+		expect(io.ran).toEqual([])
 	})
 	test('formatEntry', async () => {
 		expect(formatEntry({ term: 'T', definition: '  body \n' })).toBe('### `T`\nbody')
@@ -333,5 +339,100 @@ describe('templates and formatting', () => {
 		expect(out).not.toContain('authoritative')
 		expect(out).toContain('Use the `mcp__glossary__lookup` tool to retrieve a referenced term')
 		expect(out).toContain('`[[term-name]]`')
+	})
+})
+
+describe('GitHub token scope', () => {
+	test('isGitHubUrl accepts only https on an exact GitHub host', async () => {
+		for (const url of [
+			'https://raw.githubusercontent.com/o/r/main/g.json',
+			'https://gist.githubusercontent.com/u/id/raw/g.json',
+			'https://api.github.com/repos/o/r/contents/g.json',
+			'https://github.com/o/r/raw/main/g.json',
+			'https://GitHub.com/o/r/raw/main/g.json',
+		]) expect(isGitHubUrl(url)).toBe(true)
+		for (const url of [
+			'https://github.com.attacker.invalid/g.json',
+			'https://raw.githubusercontent.com.attacker.invalid/g.json',
+			'https://attacker.invalid/?u=https://github.com/x',
+			'https://attacker.invalid/https://raw.githubusercontent.com/x',
+			'https://github.com@attacker.invalid/g.json',
+			'https://user:pw@github.com/o/r/raw/main/g.json',
+			'https://notgithub.com/g.json',
+			'https://github.com:8443/g.json',
+			'http://raw.githubusercontent.com/o/r/main/g.json',
+			'not a url',
+		]) expect(isGitHubUrl(url)).toBe(false)
+	})
+	test('a lookalike host include is fetched without the token', async () => {
+		const evil = 'https://github.com.attacker.invalid/g.json'
+		const io = fakeIO(
+			{ [`${P}.json`]: j([{ include: evil }]) },
+			{ [evil]: j([{ term: 'x', definition: 'X' }]) },
+			{ token: 'sekret' },
+		)
+		const r = await load(io)
+		expect(r.entries.map((e) => e.term)).toEqual(['x'])
+		expect(io.fetched).toEqual([{ url: evil, headers: {} }])
+	})
+	test('plain http GitHub raw URL is fetched without the token', async () => {
+		const url = 'http://raw.githubusercontent.com/o/r/main/g.json'
+		const io = fakeIO({ [`${P}.json`]: j([{ include: url }]) }, { [url]: j([{ term: 'x', definition: 'X' }]) }, { token: 'sekret' })
+		await load(io)
+		expect(io.fetched).toEqual([{ url, headers: {} }])
+	})
+})
+
+describe('shell template trust', () => {
+	const R = 'https://example.com/r.json'
+	const R2 = 'https://example.com/r2.json'
+	const shellOf = (r: Awaited<ReturnType<typeof load>>) => Object.fromEntries(r.entries.map((e) => [e.term, e.allowShell]))
+
+	test('local entries and local includes may run shell; remote entries may not', async () => {
+		const r = await load(fakeIO(
+			{
+				[`${P}.json`]: j([{ term: 'p', definition: 'P' }, { include: 'more.json' }, { include: R }]),
+				[`${CWD}/more.json`]: j([{ term: 'm', definition: 'M' }]),
+				[`${G}.json`]: j([{ term: 'g', definition: 'G' }]),
+			},
+			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
+		))
+		expect(r.warnings).toEqual([])
+		expect(shellOf(r)).toEqual({ p: true, m: true, r: false, g: true })
+	})
+	test('a remote file cannot grant itself shell, nor spoof a local source', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R }]) },
+			{ [R]: j([{ term: 'r', definition: '{{id}}', allowShell: true, source: '.claude/glossary.json' }]) },
+		))
+		expect(r.entries[0]!.allowShell).toBe(false)
+	})
+	test('allowShell on an include in a local file opts that remote source in', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R, allowShell: true }]) },
+			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
+		))
+		expect(r.entries[0]!.allowShell).toBe(true)
+	})
+	test('allowShell must be exactly true', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R, allowShell: 'yes' }]) },
+			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
+		))
+		expect(r.entries[0]!.allowShell).toBe(false)
+	})
+	test('trust never widens below a remote include', async () => {
+		const r = await load(fakeIO(
+			{
+				[`${P}.json`]: j([{ include: R }]),
+				[`${CWD}/local.json`]: j([{ term: 'l', definition: '{{id}}' }]),
+			},
+			{
+				[R]: j([{ include: R2, allowShell: true }, { include: 'local.json' }]),
+				[R2]: j([{ term: 'r2', definition: '{{id}}' }]),
+			},
+		))
+		expect(r.warnings).toEqual([])
+		expect(shellOf(r)).toEqual({ r2: false, l: false })
 	})
 })

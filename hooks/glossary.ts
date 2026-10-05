@@ -10,6 +10,11 @@ export type GlossaryEntry = {
 	flags?: string;
 	enabled?: boolean;
 	source?: string;
+	/**
+	 * Whether `{{...}}` placeholders in the definition may run shell commands.
+	 * Set by the loader from where the entry came from; any value in the file is ignored.
+	 */
+	allowShell?: boolean;
 };
 
 export type CompiledEntry = GlossaryEntry & { matcher: RegExp };
@@ -153,11 +158,22 @@ function extractRefs(definition: string): string[] {
 	return [...definition.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]!.trim());
 }
 
-/** Expand `{{cmd}}` placeholders; each distinct command runs once; failures become `[error: msg]`. */
-export async function expandTemplate(io: GlossaryIO, definition: string, cwd: string): Promise<string> {
+export const SHELL_DISABLED_MARKER = "[shell template disabled: remote glossary source]";
+
+/**
+ * Expand `{{cmd}}` placeholders; each distinct command runs once; failures become `[error: msg]`.
+ * Without `allowShell` nothing runs and every placeholder becomes `SHELL_DISABLED_MARKER`.
+ */
+export async function expandTemplate(
+	io: GlossaryIO,
+	definition: string,
+	cwd: string,
+	opts: { allowShell: boolean },
+): Promise<string> {
 	if (!definition.includes("{{")) return definition;
 	const matches = [...definition.matchAll(/\{\{(.+?)\}\}/g)];
 	if (matches.length === 0) return definition;
+	if (!opts.allowShell) return definition.replace(/\{\{(.+?)\}\}/g, SHELL_DISABLED_MARKER);
 
 	const results = new Map<string, string>();
 	for (const match of matches) {
@@ -283,7 +299,7 @@ async function resolveGlossaryFile(io: GlossaryIO, basePath: string): Promise<st
 	return hasJsonl ? jsonlFile : jsonFile;
 }
 
-type GlossaryInclude = { include: string };
+type GlossaryInclude = { include: string; allowShell?: unknown };
 
 function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
 	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
@@ -293,8 +309,23 @@ function isUrl(source: string): boolean {
 	return source.startsWith("http://") || source.startsWith("https://");
 }
 
-function isGitHubUrl(url: string): boolean {
-	return /https?:\/\/(?:raw\.githubusercontent\.com|gist\.githubusercontent\.com|api\.github\.com|github\.com)/.test(url);
+const GITHUB_HOSTS = new Set(["raw.githubusercontent.com", "gist.githubusercontent.com", "api.github.com", "github.com"]);
+
+/** True only for https URLs whose host is exactly a GitHub content host: the only URLs that get the token. */
+export function isGitHubUrl(url: string): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return false;
+	}
+	return (
+		parsed.protocol === "https:" &&
+		parsed.port === "" &&
+		parsed.username === "" &&
+		parsed.password === "" &&
+		GITHUB_HOSTS.has(parsed.hostname)
+	);
 }
 
 /** Convert browser-visible GitHub URLs (/blob/, /raw/, gist raw) to raw-content URLs. */
@@ -321,7 +352,12 @@ async function fetchGlossaryUrl(io: GlossaryIO, url: string): Promise<string> {
 }
 
 type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; label?: string };
-type Ctx = { io: GlossaryIO; home: string; cwd: string; visited: Set<string>; warnings: string[] };
+/**
+ * `trusted`: entries may run shell templates. True for the user's own glossary files and
+ * local includes reached from them; false below a remote include unless that include
+ * (written in a trusted file) opts in with `"allowShell": true`. Trust never widens.
+ */
+type Ctx = { io: GlossaryIO; home: string; cwd: string; visited: Set<string>; warnings: string[]; trusted: boolean };
 
 /**
  * Expand raw parsed items (entries + include directives) into validated entries.
@@ -348,7 +384,8 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 					const raw = await fetchGlossaryUrl(ctx.io, source);
 					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
 					const nested = parseGlossaryFile(raw, pseudoFile);
-					result.push(...(await resolveGlossaryItems(nested, source, ctx)));
+					const trusted = ctx.trusted && item.allowShell === true;
+					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted })));
 				} else {
 					const absBase = resolvePath(ctx.cwd, source);
 					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
@@ -362,7 +399,7 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			result.push({ ...validated, source: validated.source ?? defaultSource });
+			result.push({ ...validated, source: validated.source ?? defaultSource, allowShell: ctx.trusted });
 		}
 	}
 
@@ -393,7 +430,7 @@ async function loadGlossaryFile(file: string, ctx: Ctx): Promise<LoadedFile> {
 export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: string }): Promise<LoadResult> {
 	const warnings: string[] = [];
 	try {
-		const ctx: Ctx = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings };
+		const ctx: Ctx = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true };
 		const globalFile = await resolveGlossaryFile(io, globalGlossaryBase(opts.home));
 		const projectFile = await resolveGlossaryFile(io, projectGlossaryBase(opts.cwd));
 		const globalResult = await loadGlossaryFile(globalFile, ctx);
