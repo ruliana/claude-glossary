@@ -414,6 +414,15 @@ describe('shell template trust', () => {
 		))
 		expect(r.entries[0]!.allowShell).toBe(true)
 	})
+	test('allowShell is ignored on an http include', async () => {
+		const H = 'http://example.com/r.json'
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ include: H, allowShell: true }]) },
+			{ [H]: j([{ term: 'r', definition: '{{id}}' }]) },
+		))
+		expect(r.entries[0]!.allowShell).toBe(false)
+		expect(r.warnings).toEqual([`Ignoring allowShell on ${H}: shell templates need an https URL`])
+	})
 	test('allowShell must be exactly true', async () => {
 		const r = await load(fakeIO(
 			{ [`${P}.json`]: j([{ include: R, allowShell: 'yes' }]) },

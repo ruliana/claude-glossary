@@ -401,7 +401,12 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 					const raw = await fetchGlossaryUrl(ctx.io, source);
 					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
 					const nested = parseGlossaryFile(raw, pseudoFile);
-					const trusted = ctx.trusted && item.allowShell === true;
+					// Over plain http anyone on the network path could rewrite the file, so the opt-in needs https.
+					const overHttp = !source.startsWith("https://");
+					if (item.allowShell === true && overHttp) {
+						ctx.warnings.push(`Ignoring allowShell on ${source}: shell templates need an https URL`);
+					}
+					const trusted = ctx.trusted && item.allowShell === true && !overHttp;
 					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, origin: "remote" })));
 				} else {
 					const absBase = resolvePath(ctx.cwd, source);

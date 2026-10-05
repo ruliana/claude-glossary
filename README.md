@@ -189,7 +189,7 @@ The current branch in /home/user/myproject is feat/new-login.
 { "include": "https://raw.githubusercontent.com/org/repo/main/glossary.json", "allowShell": true }
 ```
 
-Anyone who can change that URL's content can then run commands on your machine whenever a matching term is mentioned, so opt in only for sources you control.
+Anyone who can change that URL's content can then run commands on your machine whenever a matching term is mentioned, so opt in only for sources you control. `allowShell` only works on `https` URLs; on an `http` include it is ignored with a warning, since anyone on the network path could rewrite the file.
 
 ## Validation
 
