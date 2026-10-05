@@ -466,13 +466,18 @@ export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: st
 			if (!merged.has(entry.term)) merged.set(entry.term, entry);
 		}
 
-		const entries: CompiledEntry[] = Array.from(merged.values()).map((entry, index) => {
+		// A bad pattern in the user's own files is a load error they can fix; one from a URL
+		// include only drops that entry, so a remote glossary cannot disable everything else.
+		const entries: CompiledEntry[] = [];
+		for (const [index, entry] of Array.from(merged.values()).entries()) {
 			try {
-				return { ...entry, matcher: buildMatcher(entry) };
+				entries.push({ ...entry, matcher: buildMatcher(entry) });
 			} catch (error) {
-				throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: ${errMessage(error)}`);
+				const message = `Invalid glossary ${describeGlossaryEntry(entry, index)}: ${errMessage(error)}`;
+				if (entry.origin !== "remote") throw new Error(message);
+				warnings.push(`Skipping ${message.charAt(0).toLowerCase()}${message.slice(1)} (from ${entry.source})`);
 			}
-		});
+		}
 
 		const files = [globalResult, projectResult].filter((r) => r.found).map((r) => r.label ?? r.path);
 		return { entries, files, warnings };
