@@ -213,6 +213,11 @@ That means these work well out of the box:
 
 Use `pattern` when you want total control over matching.
 
+Custom patterns run against every prompt and on every keystroke, so a pattern that backtracks badly can freeze the session. To keep a glossary you did not write from doing that:
+
+- Entries from a URL include cannot set `pattern` or `flags`; they match on `term` and `aliases`, with a warning.
+- Project glossary entries cannot use a pattern that repeats a group which itself repeats or alternates, such as `(a+)+` or `(a|aa)*`. The entry falls back to `term` and `aliases`, with a warning. Patterns in your global glossary are used as written.
+
 When multiple entries match the same prompt, all matching entries are considered. Entries already loaded earlier in the session are skipped so they are not injected again.
 
 ## Tool

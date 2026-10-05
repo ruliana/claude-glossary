@@ -123,6 +123,59 @@ export function buildMatcher(entry: GlossaryEntry): RegExp {
 	return new RegExp(`(?<![\\p{L}\\p{N}_])(?:${variants.join("|")})(?![\\p{L}\\p{N}_])`, entry.flags ?? "iu");
 }
 
+/**
+ * True when `pattern` could backtrack exponentially: a group repeated without bound
+ * (`*`, `+`, `{n,}`, or a count above one) that itself contains a quantifier or an alternation, as in
+ * `(a+)+` or `(a|aa)*`. Conservative: some safe patterns are rejected too.
+ */
+export function isRiskyPattern(pattern: string): boolean {
+	// One frame per open group: does it contain a quantifier or `|`?
+	const stack: boolean[] = [false];
+	let i = 0;
+	const unboundedAt = (j: number): boolean => {
+		const c = pattern[j];
+		if (c === "*" || c === "+") return true;
+		const m = c === "{" ? /^\{(\d+)(,(\d*))?\}/.exec(pattern.slice(j)) : null;
+		// `{n,}` or any count above one: `(a+){20}` backtracks as badly as `(a+)+`.
+		return m !== null && (m[3] === "" || Number(m[3] ?? m[1]) > 1);
+	};
+	const quantifierAt = (j: number): boolean => {
+		const c = pattern[j];
+		return c === "*" || c === "+" || c === "?" || (c === "{" && /^\{\d*(,\d*)?\}/.test(pattern.slice(j)));
+	};
+	const mark = () => {
+		stack[stack.length - 1] = true;
+	};
+	while (i < pattern.length) {
+		const c = pattern[i]!;
+		if (c === "\\") {
+			i += 2;
+		} else if (c === "[") {
+			i++;
+			if (pattern[i] === "^") i++;
+			if (pattern[i] === "]") i++;
+			while (i < pattern.length && pattern[i] !== "]") i += pattern[i] === "\\" ? 2 : 1;
+			i++;
+		} else if (c === "(") {
+			stack.push(false);
+			i++;
+		} else if (c === ")") {
+			const inner = stack.length > 1 ? stack.pop()! : false;
+			i++;
+			if (inner && unboundedAt(i)) return true;
+			if (inner) mark();
+		} else if (c === "|") {
+			mark();
+			i++;
+		} else {
+			// A quantifier right after a group's opening `(?` is group syntax, not a repeat.
+			if (quantifierAt(i) && !(c === "?" && pattern[i - 1] === "(")) mark();
+			i++;
+		}
+	}
+	return false;
+}
+
 function matchesText(matcher: RegExp, text: string): boolean {
 	matcher.lastIndex = 0;
 	const matched = matcher.test(text);
@@ -440,6 +493,25 @@ async function loadGlossaryFile(file: string, ctx: Ctx): Promise<LoadedFile> {
 }
 
 /**
+ * Custom `pattern`s run against every prompt and every keystroke, so a slow one can freeze
+ * the session. Remote entries may not set `pattern` or `flags` at all, and a project
+ * entry's pattern must pass `isRiskyPattern`; otherwise the entry matches on its term
+ * and aliases. Patterns in the user's own global glossary are left alone.
+ */
+function safeMatcherFields(entry: GlossaryEntry, warnings: string[]): GlossaryEntry {
+	if (entry.pattern === undefined && entry.flags === undefined) return entry;
+	let reason: string | undefined;
+	if (entry.origin === "remote") reason = "custom patterns and flags from a URL include are ignored";
+	else if (entry.origin === "project" && entry.pattern !== undefined && isRiskyPattern(entry.pattern)) {
+		reason = "its pattern repeats a group that has its own repetition or alternation, which can freeze the session";
+	}
+	if (!reason) return entry;
+	warnings.push(`Glossary term "${entry.term}" matches on its term and aliases only: ${reason}`);
+	const { pattern: _pattern, flags: _flags, ...rest } = entry;
+	return rest;
+}
+
+/**
  * Load global then project glossary, resolve includes, validate, merge
  * (first entry in a file wins; project overrides global by `term`), compile matchers.
  * Never throws: failures go to `error` / `warnings`.
@@ -463,7 +535,8 @@ export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: st
 
 		const entries: CompiledEntry[] = Array.from(merged.values()).map((entry, index) => {
 			try {
-				return { ...entry, matcher: buildMatcher(entry) };
+				const safe = safeMatcherFields(entry, warnings);
+				return { ...safe, matcher: buildMatcher(safe) };
 			} catch (error) {
 				throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: ${errMessage(error)}`);
 			}

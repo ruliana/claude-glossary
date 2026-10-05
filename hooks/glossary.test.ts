@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'claude-code/testing'
 import {
 	buildContextBlock, buildMatcher, expandTemplate, filterEntries, findTerm, formatEntry,
-	globalGlossaryBase, isGitHubUrl, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
+	globalGlossaryBase, isGitHubUrl, isRiskyPattern, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
 	GLOSSARY_HEADING, GLOSSARY_PREAMBLE,
 } from './glossary'
 import type { CompiledEntry, GlossaryEntry, GlossaryIO } from './glossary'
@@ -456,5 +456,43 @@ describe('entry origin', () => {
 			{ [R]: j([{ include: 'local.json' }]) },
 		))
 		expect(r.entries[0]!.origin).toBe('remote')
+	})
+})
+
+describe('risky patterns', () => {
+	test('isRiskyPattern flags nested and alternated repeats', async () => {
+		for (const p of ['^(a+)+$', '(a*)*b', '(a|aa)+$', '(?:x+y?)*', '((a)+)+', '(\\w+\\s?){2,}$', '(a+){20}', '([a-z]+)*'])
+			expect(isRiskyPattern(p)).toBe(true)
+		for (const p of ['\\bfoo\\b', '(?:foo|bar)', '(?<!\\w)grill\\s+me(?!\\w)', 'a+b*', '(ab)+', '[(+*]+', '\\(a+\\)+', '(?:ab)?', '(a+)?', '(a|b){1}'])
+			expect(isRiskyPattern(p)).toBe(false)
+	})
+	test('a remote entry cannot set pattern or flags; it matches on its term', async () => {
+		const R = 'https://example.com/r.json'
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ include: R }]) },
+			{ [R]: j([{ term: 'gadget', definition: 'D', pattern: '^(a+)+$', flags: 'u' }]) },
+		))
+		expect(r.entries[0]!.pattern).toBeUndefined()
+		expect(r.warnings).toEqual(['Glossary term "gadget" matches on its term and aliases only: custom patterns and flags from a URL include are ignored'])
+		expect(matchEntries(r.entries, 'a'.repeat(40) + '!')).toEqual([])
+		expect(matchEntries(r.entries, 'a GADGET')).toHaveLength(1)
+	})
+	test('a project entry with a risky pattern falls back to its term; a safe one is kept', async () => {
+		const r = await load(fakeIO({
+			[`${P}.json`]: j([
+				{ term: 'slow', definition: 'D', pattern: '^(a|aa)+$' },
+				{ term: 'fine', definition: 'D', pattern: '\\bfi+ne\\b' },
+			]),
+		}))
+		expect(r.entries.map((e) => e.pattern)).toEqual([undefined, '\\bfi+ne\\b'])
+		expect(r.warnings).toHaveLength(1)
+		const started = Date.now()
+		expect(matchEntries(r.entries, 'a'.repeat(40) + '!')).toEqual([])
+		expect(Date.now() - started).toBeLessThan(100)
+	})
+	test('the global glossary keeps whatever pattern the user wrote', async () => {
+		const r = await load(fakeIO({ [`${G}.json`]: j([{ term: 'mine', definition: 'D', pattern: '(foo|bar)+' }]) }))
+		expect(r.entries[0]!.pattern).toBe('(foo|bar)+')
+		expect(r.warnings).toEqual([])
 	})
 })
