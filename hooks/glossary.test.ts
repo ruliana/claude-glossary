@@ -436,3 +436,25 @@ describe('shell template trust', () => {
 		expect(shellOf(r)).toEqual({ r2: false, l: false })
 	})
 })
+
+describe('entry origin', () => {
+	const R = 'https://example.com/r.json'
+	test('the loader records global, project or remote, ignoring the file', async () => {
+		const r = await load(fakeIO(
+			{
+				[`${G}.json`]: j([{ term: 'g', definition: 'G', origin: 'project' }, { include: '/home/u/more.json' }]),
+				'/home/u/more.json': j([{ term: 'gm', definition: 'GM' }]),
+				[`${P}.json`]: j([{ term: 'p', definition: 'P', origin: 'global' }, { include: R }]),
+			},
+			{ [R]: j([{ term: 'r', definition: 'R', origin: 'global' }]) },
+		))
+		expect(Object.fromEntries(r.entries.map((e) => [e.term, e.origin]))).toEqual({ p: 'project', r: 'remote', g: 'global', gm: 'global' })
+	})
+	test('a local file included below a remote include is remote', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R }]), [`${CWD}/local.json`]: j([{ term: 'l', definition: 'L' }]) },
+			{ [R]: j([{ include: 'local.json' }]) },
+		))
+		expect(r.entries[0]!.origin).toBe('remote')
+	})
+})
