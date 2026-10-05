@@ -16,7 +16,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 2. Either file may contain `{"include": "path_or_url"}` entries to inline entries from another local file or URL at that position (see [Include Directives](#include-directives)).
 3. Project entries override global entries when they use the same `term`. Within a file, **earlier entries (top) take priority** over later ones.
 4. When you submit a prompt (the `prompt.submit` function hook), the plugin scans it for all matching glossary terms, aliases, or explicit regex patterns.
-5. If one or more terms match, only terms not already loaded in the current session are attached to the prompt as hidden context: the model sees the definitions, while the transcript shows your prompt as typed. The first injection in a session includes guidance for interpreting glossary definitions; later injections include only the `## Glossary` heading and new term definitions.
+5. If one or more terms match, only terms not already loaded in the current session are attached to the prompt as hidden context: the model sees the definitions, while the transcript shows your prompt as typed. The first injection in a session includes guidance for interpreting glossary definitions; later injections include only the `## Glossary` heading and new term definitions. Definitions from a URL include are marked as not written by you, so the model reads them as an explanation of the term rather than as instructions; definitions from your global and project glossaries are not marked.
 6. Loaded terms stay visible for the rest of the session in the status line as `Glossary: term, term`.
 7. Matched terms are highlighted live in the prompt box as you type.
 8. After a context compaction or a `/clear`, loaded terms are reset, so they are re-injected when mentioned again.
@@ -145,7 +145,7 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
 - Included files may themselves contain `include` directives (recursive).
 - Relative local paths resolve against the project directory (where Claude Code was started), not against the file that contains the include. This applies to includes in the global glossary and in nested includes too, so prefer absolute paths there.
-- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https` and only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`; every other URL is fetched without it.
+- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https` and only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`; every other URL is fetched without it. The token is also sent only for includes written in your global glossary (or a local file it includes). An include in a project glossary, or inside a remote glossary, is fetched without it, so a repository or a remote file cannot read your private GitHub content. To include a private GitHub glossary in a project, add that include to your global glossary instead.
 - Entries from a URL include cannot run [shell command templates](#shell-command-templates) unless the include opts in with `"allowShell": true` (see below).
 
 ## Glossary Entry Fields
@@ -199,7 +199,7 @@ Each enabled entry must have:
 - a non-empty `definition`
 - a valid regex `pattern` if `pattern` is provided
 
-If validation fails, `/glossary` and `/glossary reload` show an actionable error that identifies the bad entry.
+If validation fails, `/glossary` and `/glossary reload` show an actionable error that identifies the bad entry. An entry from a URL include whose `pattern` or `flags` do not compile is skipped with a warning instead, so a broken remote glossary cannot switch off the rest of yours.
 
 ## Matching Behavior
 
