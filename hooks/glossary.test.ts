@@ -172,9 +172,17 @@ describe('loading', () => {
 		const r = await load(fakeIO({ [`${P}.json`]: j([{ term: 'a', definition: 'A', enabled: false }, { term: 'b', definition: 'B' }]) }))
 		expect(r.entries.map((e) => e.term)).toEqual(['b'])
 	})
-	test('explicit source is kept', async () => {
-		const r = await load(fakeIO({ [`${P}.json`]: j([{ term: 'a', definition: 'A', source: 'custom' }]) }))
-		expect(r.entries[0]!.source).toBe('custom')
+	test('explicit source is a note after the real location', async () => {
+		const r = await load(fakeIO({ [`${P}.json`]: j([{ term: 'a', definition: 'A', source: 'custom' }, { term: 'b', definition: 'B', source: '.claude/glossary.json' }]) }))
+		expect(r.entries.map((e) => e.source)).toEqual(['.claude/glossary.json (custom)', '.claude/glossary.json'])
+	})
+	test('a remote file cannot label its entries as a local file', async () => {
+		const R = 'https://example.com/r.json'
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ include: R }]) },
+			{ [R]: j([{ term: 'r', definition: 'R', source: '~/.claude/glossary.json' }, { term: 'n', definition: 'N', source: 42 }]) },
+		))
+		expect(r.entries.map((e) => e.source)).toEqual([`${R} (~/.claude/glossary.json)`, R])
 	})
 	test('first entry in a file wins; project overrides global', async () => {
 		const r = await load(fakeIO({

@@ -416,7 +416,11 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			result.push({ ...validated, source: validated.source ?? defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
+			// The file's own `source` is only a note after where the entry really came from,
+			// so a remote file cannot pass itself off as one of the user's files.
+			const note = typeof validated.source === "string" ? validated.source.trim() : "";
+			const source = note && note !== defaultSource ? `${defaultSource} (${note})` : defaultSource;
+			result.push({ ...validated, source, allowShell: ctx.trusted, origin: ctx.origin });
 		}
 	}
 
