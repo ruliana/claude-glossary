@@ -145,7 +145,8 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
 - Included files may themselves contain `include` directives (recursive).
 - Relative local paths resolve against the project directory (where Claude Code was started), not against the file that contains the include. This applies to includes in the global glossary and in nested includes too, so prefer absolute paths there.
-- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available.
+- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https` and only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`; every other URL is fetched without it.
+- Entries from a URL include cannot run [shell command templates](#shell-command-templates) unless the include opts in with `"allowShell": true` (see below).
 
 ## Glossary Entry Fields
 
@@ -181,6 +182,14 @@ The current branch in /home/user/myproject is feat/new-login.
 - Each distinct command in a definition runs at most once per injection.
 - If a command exits with an error or times out (5 s limit), the placeholder is replaced with `[error: <message>]` rather than stopping the injection.
 - The `/glossary` browser shows the raw template text (unexpanded), since expansion happens at prompt-submit time.
+- Templates run only for entries from your own glossary files and the local files they include. Entries that come from a URL include (directly or through anything it includes) are not expanded: each placeholder becomes `[shell template disabled: remote glossary source]`.
+- To let a remote glossary you trust run its templates, add `"allowShell": true` to the include in your own file. Only an include written in a local glossary can grant this; a remote glossary cannot grant it to itself or to what it includes:
+
+```json
+{ "include": "https://raw.githubusercontent.com/org/repo/main/glossary.json", "allowShell": true }
+```
+
+Anyone who can change that URL's content can then run commands on your machine whenever a matching term is mentioned, so opt in only for sources you control.
 
 ## Validation
 

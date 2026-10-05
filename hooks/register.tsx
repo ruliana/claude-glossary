@@ -182,7 +182,7 @@ export const register: Register = (on) => {
 			const dir = cwd || (await $.session.cwd());
 			const io = makeIO($);
 			const expanded = await Promise.all(
-				matched.map(async (entry) => ({ ...entry, definition: await expandTemplate(io, entry.definition, dir) })),
+				matched.map(async (entry) => ({ ...entry, definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }) })),
 			);
 			const hasPreamble = await read($, preambleState);
 			const block = buildContextBlock(expanded, { includePreamble: !hasPreamble, toolName: TOOL });
@@ -201,7 +201,9 @@ export const register: Register = (on) => {
 		const entry = findTerm(entries, term) ?? matchEntries(entries, term)[0];
 		if (!entry) return { result: `Glossary term not found: "${term}"` };
 		if (!(await read($, loadedState)).includes(entry.term)) await markLoaded($, [entry.term]);
-		const definition = await expandTemplate(makeIO($), entry.definition, cwd || (await $.session.cwd()));
+		const definition = await expandTemplate(makeIO($), entry.definition, cwd || (await $.session.cwd()), {
+			allowShell: entry.allowShell === true,
+		});
 		return { result: `### \`${entry.term}\`\n${definition}` };
 	});
 
