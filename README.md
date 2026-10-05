@@ -158,7 +158,6 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 | `pattern` | No | Explicit regex trigger; overrides the default matcher |
 | `flags` | No | Regex flags, defaults to `iu` |
 | `enabled` | No | Set to `false` to disable an entry |
-| `source` | No | Descriptive provenance string shown in the glossary browser; not included in injected context |
 
 ## Shell Command Templates
 

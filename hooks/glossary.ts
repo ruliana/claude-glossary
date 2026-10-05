@@ -9,6 +9,7 @@ export type GlossaryEntry = {
 	pattern?: string;
 	flags?: string;
 	enabled?: boolean;
+	/** The file or URL the entry was loaded from. Set by the loader; any value in the file is ignored. */
 	source?: string;
 	/**
 	 * Whether `{{...}}` placeholders in the definition may run shell commands.
@@ -425,7 +426,8 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			result.push({ ...validated, source: validated.source ?? defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
+			// Any `source` in the file is ignored, so a remote file cannot pass itself off as one of the user's files.
+			result.push({ ...validated, source: defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
 		}
 	}
 
