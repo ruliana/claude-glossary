@@ -8,6 +8,7 @@ import {
 	expandTemplate,
 	filterEntries,
 	findTerm,
+	formatEntry,
 	loadGlossary,
 	matchEntries,
 	matchRanges,
@@ -229,7 +230,7 @@ export const register: Register = (on) => {
 		if (!entry) return { result: `Glossary term not found: "${term}"` };
 		if (!(await read($, loadedState)).includes(entry.term)) await markLoaded($, [entry.term]);
 		const definition = await expand(makeIO($), entry, cwd || (await $.session.cwd()));
-		return { result: `### \`${entry.term}\`\n${definition}` };
+		return { result: formatEntry({ ...entry, definition }) };
 	});
 
 	// Live highlight of glossary terms in the prompt box.
