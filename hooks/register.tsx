@@ -8,6 +8,7 @@ import {
 	expandTemplate,
 	filterEntries,
 	findTerm,
+	formatEntry,
 	loadGlossary,
 	matchEntries,
 	matchRanges,
@@ -204,7 +205,7 @@ export const register: Register = (on) => {
 		const definition = await expandTemplate(makeIO($), entry.definition, cwd || (await $.session.cwd()), {
 			allowShell: entry.allowShell === true,
 		});
-		return { result: `### \`${entry.term}\`\n${definition}` };
+		return { result: formatEntry({ ...entry, definition }) };
 	});
 
 	// Live highlight of glossary terms in the prompt box.
