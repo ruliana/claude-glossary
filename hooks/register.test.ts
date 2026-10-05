@@ -27,7 +27,16 @@ type World = {
 	urls: Map<string, string>;
 	fetched: { url: string; headers: Record<string, string> }[];
 	ran: string[][];
+	/** Modification times by path; `edit` bumps them. */
+	mtimes: Map<string, number>;
 };
+
+/** Change a file the way an editor would: new text, newer mtime. `undefined` deletes it. */
+function edit(w: World, path: string, text: string | undefined) {
+	if (text === undefined) w.files.delete(path);
+	else w.files.set(path, text);
+	w.mtimes.set(path, (w.mtimes.get(path) ?? 1) + 1);
+}
 
 /** Stand in for the engine beneath the plugin: fs, process, http, ui nouns, and the session's own echoes. */
 function world(
@@ -48,6 +57,7 @@ function world(
 		urls: new Map(Object.entries(opts.urls ?? {})),
 		fetched: [],
 		ran: [],
+		mtimes: new Map(),
 	};
 	mock.env(on, { HOME, ...opts.env });
 	mock.store(on);
@@ -55,6 +65,11 @@ function world(
 	on('session.surfaces', () => ({ value: w.surfaces }));
 	on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) }));
 	on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }));
+	on('fs.stat', (_$, e) => {
+		const text = w.files.get(e.path);
+		if (text === undefined) throw new Error(`ENOENT: ${e.path}`);
+		return { value: { kind: 'file' as const, size: text.length, mtimeMs: w.mtimes.get(e.path) ?? 1, isLink: false } };
+	});
 	on('fs.write', (_$, e) => {
 		w.files.set(e.path, e.text);
 		return { value: undefined };
@@ -333,4 +348,63 @@ test('a GitHub raw include gets the token and runs shell only when the local inc
 	expect(w.fetched).toEqual([{ url: remote, headers: { Authorization: 'Bearer sekret' } }]);
 	const sub = await submit($, 'gadget');
 	expect(sub.context?.[0] ?? '').toContain('Today is hi.');
+});
+
+const PROJECT = `${CWD}/.claude/glossary.json`;
+
+test('an edited glossary file reloads on the next prompt, re-injecting only changed terms', async ($, on) => {
+	const w = world(on);
+	await start($);
+	await submit($, 'widget sprocket');
+	expect(lastStatus(w)).toBe('Glossary: widget, sprocket');
+
+	// Nothing changed: no reload.
+	await submit($, 'flange');
+	expect(w.toasts.filter((t) => t.startsWith('Glossary reloaded'))).toEqual([]);
+
+	edit(w, GLOBAL, JSON.stringify([
+		{ term: 'widget', definition: 'A widget is a new thing.' },
+		GLOSSARY[1],
+		{ term: 'bolt', definition: 'A bolt.' },
+	]));
+	const r = await submit($, 'widget sprocket bolt');
+	expect(w.toasts).toContain('Glossary reloaded: 3 entries from ~/.claude/glossary.json');
+	const block = r.context?.[0] ?? '';
+	expect(block).toContain('A widget is a new thing.');
+	expect(block).toContain('### `bolt`');
+	// sprocket did not change, so it is still loaded and not repeated; flange is gone.
+	expect(block).not.toContain('### `sprocket`');
+	expect(block).not.toContain('authoritative');
+	expect(lastStatus(w)).toBe('Glossary: sprocket, widget, bolt');
+});
+
+test('a project glossary created mid-session is picked up, and a local include edit reloads', async ($, on) => {
+	const w = world(on);
+	await start($);
+	expect((await submit($, 'nut')).context ?? []).toEqual([]);
+
+	edit(w, PROJECT, JSON.stringify([{ include: 'extra.json' }]));
+	edit(w, `${CWD}/extra.json`, JSON.stringify([{ term: 'nut', definition: 'A nut.' }]));
+	expect((await submit($, 'nut')).context?.[0]).toContain('A nut.');
+
+	edit(w, `${CWD}/extra.json`, JSON.stringify([{ term: 'nut', definition: 'A hex nut.' }]));
+	const looked = await $.tool.call({ tool: 'mcp__glossary__lookup', term: 'nut' });
+	expect(String(looked.result)).toContain('A hex nut.');
+});
+
+test('a glossary broken mid-edit keeps the previous one until it is fixed', async ($, on) => {
+	const w = world(on);
+	await start($);
+	edit(w, GLOBAL, '[{"term": "widget",');
+	const r = await submit($, 'widget');
+	expect(r.context?.[0]).toContain('A widget is a thing.');
+	expect(w.toasts.some((t) => t.startsWith('Glossary reload failed') && t.includes('keeping the previous glossary'))).toBe(true);
+
+	// The broken state is reported once, not on every prompt.
+	const failures = w.toasts.length;
+	await submit($, 'flange');
+	expect(w.toasts.length).toBe(failures);
+
+	edit(w, GLOBAL, JSON.stringify([{ term: 'widget', definition: 'Fixed widget.' }]));
+	expect((await submit($, 'widget')).context?.[0]).toContain('Fixed widget.');
 });
