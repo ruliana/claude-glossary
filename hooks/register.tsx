@@ -12,6 +12,7 @@ import {
 	loadGlossary,
 	matchEntries,
 	matchRanges,
+	SUBAGENT_PREAMBLE,
 } from './glossary';
 import type { CompiledEntry, GlossaryIO, LoadResult } from './glossary';
 
@@ -89,11 +90,43 @@ async function resetLoaded($: EngineInterface) {
 	syncStatus($, []);
 };
 
-/** Load the files and publish the result to the module variable and `$.state`. */
-async function load($: EngineInterface): Promise<LoadResult> {
+/**
+ * Local paths the last load looked at (the glossary files, whether or not they
+ * exist, and every local file they include) and their stat at that time.
+ * Comparing them on each prompt is how an edited glossary reloads by itself.
+ * URL includes are not watched: they refetch only when a local file changes.
+ */
+let watched: string[] = [];
+let fingerprint = '';
+
+async function snapshot($: EngineInterface, paths: string[]): Promise<string> {
+	const parts = await Promise.all(
+		paths.map(async (path) => {
+			try {
+				const s = await $.fs.stat(path);
+				return `${path}\t${s.kind}\t${s.size}\t${s.mtimeMs}`;
+			} catch {
+				return `${path}\tmissing`;
+			}
+		}),
+	);
+	return parts.join('\n');
+}
+
+/**
+ * Load the files and publish the result to the module variable and `$.state`.
+ * With `keepOnError`, a failed load leaves the previous glossary in place.
+ */
+async function load($: EngineInterface, opts: { keepOnError?: boolean } = {}): Promise<LoadResult> {
 	home = (await $.env.get('HOME')) ?? home;
 	cwd = await $.session.cwd();
-	const result = await loadGlossary(makeIO($), { home, cwd });
+	const io = makeIO($);
+	const seen = new Set<string>();
+	const result = await loadGlossary({ ...io, exists: (path) => (seen.add(path), io.exists(path)) }, { home, cwd });
+	// A failed load may stop before reaching every file; keep watching the old ones too.
+	watched = result.error ? [...new Set([...watched, ...seen])] : [...seen];
+	fingerprint = await snapshot($, watched);
+	if (result.error && opts.keepOnError) return result;
 	entries = result.entries;
 	await update($, entriesState, () =>
 		entries.map((e) => ({
@@ -105,6 +138,27 @@ async function load($: EngineInterface): Promise<LoadResult> {
 	);
 	await update($, errorState, () => result.error ?? null);
 	return result;
+};
+
+/**
+ * Reload when a watched glossary file was created, edited or deleted since the
+ * last load. Loaded terms whose definition changed (or that are gone) are
+ * forgotten, so the new definition injects the next time they are mentioned;
+ * the rest stay loaded. A file broken mid-edit keeps the previous glossary.
+ */
+async function reloadIfChanged($: EngineInterface) {
+	if (watched.length === 0 || (await snapshot($, watched)) === fingerprint) return;
+	const before = new Map(entries.map((e) => [e.term, e.definition]));
+	const result = await load($, { keepOnError: true });
+	if (result.error) {
+		$.ui.toast(`Glossary reload failed: ${result.error} (keeping the previous glossary)`);
+		return;
+	}
+	const now = new Map(entries.map((e) => [e.term, e.definition]));
+	const kept = await update($, loadedState, (list) => list.filter((t) => now.has(t) && now.get(t) === before.get(t)));
+	syncStatus($, kept);
+	for (const w of result.warnings) $.ui.toast(`Glossary warning: ${w}`);
+	$.ui.toast(`Glossary reloaded: ${plural(entries.length)}${sources(result.files)}`);
 };
 
 /**
@@ -121,6 +175,18 @@ async function installDefault($: EngineInterface) {
 	await $.fs.write(`${base}.json`, `${JSON.stringify(DEFAULT_GLOSSARY, null, '\t')}\n`);
 	await $.store.set(DEFAULT_OFFERED_KEY, true);
 	$.ui.toast(`Glossary: wrote a default glossary to ~/.claude/glossary.json`);
+};
+
+/** The entries with their `{{...}}` templates expanded, as each entry's trust allows. */
+async function expandAll($: EngineInterface, list: CompiledEntry[]): Promise<CompiledEntry[]> {
+	const dir = cwd || (await $.session.cwd());
+	const io = makeIO($);
+	return Promise.all(
+		list.map(async (entry) => ({
+			...entry,
+			definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }),
+		})),
+	);
 };
 
 export const register: Register = (on) => {
@@ -175,16 +241,14 @@ export const register: Register = (on) => {
 
 	on('prompt.submit', async ($, e, next) => {
 		try {
-			if (!USER_ORIGINS.has(e.origin.kind) || entries.length === 0 || !e.text.trim()) return next(e);
+			if (!USER_ORIGINS.has(e.origin.kind) || !e.text.trim()) return next(e);
+			await reloadIfChanged($);
+			if (entries.length === 0) return next(e);
 			const loaded = new Set(await read($, loadedState));
 			const matched = matchEntries(entries, e.text, loaded);
 			if (matched.length === 0) return next(e);
 
-			const dir = cwd || (await $.session.cwd());
-			const io = makeIO($);
-			const expanded = await Promise.all(
-				matched.map(async (entry) => ({ ...entry, definition: await expandTemplate(io, entry.definition, dir, { allowShell: entry.allowShell === true }) })),
-			);
+			const expanded = await expandAll($, matched);
 			const hasPreamble = await read($, preambleState);
 			const block = buildContextBlock(expanded, { includePreamble: !hasPreamble, toolName: TOOL });
 			await update($, preambleState, () => true);
@@ -197,8 +261,34 @@ export const register: Register = (on) => {
 		}
 	});
 
+	// A subagent starts with a fresh context: none of the definitions injected
+	// into this conversation reach it. Hand it the ones its task mentions, every
+	// time (each subagent's context is its own), without marking them loaded
+	// here. A fork inherits this conversation, glossary included, so it gets none.
+	on('agent.spawn', async ($, e, next) => {
+		if (e.fork) return next(e);
+		let prompt = e.prompt;
+		try {
+			await reloadIfChanged($);
+			const matched = matchEntries(entries, e.prompt);
+			if (matched.length > 0) {
+				const block = buildContextBlock(await expandAll($, matched), {
+					includePreamble: true,
+					preamble: SUBAGENT_PREAMBLE,
+					toolName: TOOL,
+				});
+				prompt = `${e.prompt}\n\n${block}`;
+			}
+		} catch (error) {
+			// Never block a subagent over the glossary.
+			$.ui.log(`glossary: subagent injection failed: ${error instanceof Error ? error.message : error}`, { to: 'debug' });
+		}
+		return prompt === e.prompt ? next(e) : next({ ...e, prompt });
+	});
+
 	on('tool.call', { tool: TOOL }, async ($, e) => {
 		const term = String((e as { term?: unknown }).term ?? '').trim();
+		await reloadIfChanged($);
 		const entry = findTerm(entries, term) ?? matchEntries(entries, term)[0];
 		if (!entry) return { result: `Glossary term not found: "${term}"` };
 		if (!(await read($, loadedState)).includes(entry.term)) await markLoaded($, [entry.term]);
@@ -263,6 +353,7 @@ export const register: Register = (on) => {
 			return { text };
 		}
 
+		await reloadIfChanged($);
 		const error = await read($, errorState);
 		if (error) return { text: `Glossary load error: ${error}` };
 		if (entries.length === 0) return { text: 'No glossary entries loaded' };
