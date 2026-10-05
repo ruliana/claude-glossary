@@ -15,7 +15,15 @@ export type GlossaryEntry = {
 	 * Set by the loader from where the entry came from; any value in the file is ignored.
 	 */
 	allowShell?: boolean;
+	/**
+	 * Where the entry was loaded from: the user's global glossary (or a local file it includes),
+	 * the project glossary (or a local file it includes), or a URL include at any depth.
+	 * Set by the loader; any value in the file is ignored.
+	 */
+	origin?: GlossaryOrigin;
 };
+
+export type GlossaryOrigin = "global" | "project" | "remote";
 
 export type CompiledEntry = GlossaryEntry & { matcher: RegExp };
 
@@ -342,9 +350,14 @@ function normalizeGitHubUrl(url: string): string {
 	return url;
 }
 
-async function fetchGlossaryUrl(io: GlossaryIO, url: string): Promise<string> {
+/**
+ * `withToken`: the include was written in the user's global glossary (or a local file it
+ * includes). Includes written in a project glossary or below a URL include never get the
+ * token, so a repository or a remote glossary cannot read private GitHub content with it.
+ */
+async function fetchGlossaryUrl(io: GlossaryIO, url: string, withToken: boolean): Promise<string> {
 	const headers: Record<string, string> = {};
-	if (isGitHubUrl(url)) {
+	if (withToken && isGitHubUrl(url)) {
 		const token = await io.githubToken();
 		if (token) headers["Authorization"] = `Bearer ${token}`;
 	}
@@ -357,7 +370,16 @@ type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; labe
  * local includes reached from them; false below a remote include unless that include
  * (written in a trusted file) opts in with `"allowShell": true`. Trust never widens.
  */
-type Ctx = { io: GlossaryIO; home: string; cwd: string; visited: Set<string>; warnings: string[]; trusted: boolean };
+type Ctx = {
+	io: GlossaryIO;
+	home: string;
+	cwd: string;
+	visited: Set<string>;
+	warnings: string[];
+	trusted: boolean;
+	/** Origin of the file being read; becomes "remote" below a URL include and never changes back. */
+	origin: GlossaryOrigin;
+};
 
 /**
  * Expand raw parsed items (entries + include directives) into validated entries.
@@ -381,11 +403,11 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 
 			try {
 				if (isUrl(source)) {
-					const raw = await fetchGlossaryUrl(ctx.io, source);
+					const raw = await fetchGlossaryUrl(ctx.io, source, ctx.origin === "global");
 					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
 					const nested = parseGlossaryFile(raw, pseudoFile);
 					const trusted = ctx.trusted && item.allowShell === true;
-					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted })));
+					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, origin: "remote" })));
 				} else {
 					const absBase = resolvePath(ctx.cwd, source);
 					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
@@ -399,7 +421,7 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			result.push({ ...validated, source: validated.source ?? defaultSource, allowShell: ctx.trusted });
+			result.push({ ...validated, source: validated.source ?? defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
 		}
 	}
 
@@ -430,11 +452,11 @@ async function loadGlossaryFile(file: string, ctx: Ctx): Promise<LoadedFile> {
 export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: string }): Promise<LoadResult> {
 	const warnings: string[] = [];
 	try {
-		const ctx: Ctx = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true };
+		const ctx: Omit<Ctx, "origin"> = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true };
 		const globalFile = await resolveGlossaryFile(io, globalGlossaryBase(opts.home));
 		const projectFile = await resolveGlossaryFile(io, projectGlossaryBase(opts.cwd));
-		const globalResult = await loadGlossaryFile(globalFile, ctx);
-		const projectResult = await loadGlossaryFile(projectFile, ctx);
+		const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
+		const projectResult = await loadGlossaryFile(projectFile, { ...ctx, origin: "project" });
 
 		// Merge in reverse so first entry in each file wins; project overrides global.
 		// First occurrence wins: project before global, top of each file before bottom.
