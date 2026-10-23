@@ -344,7 +344,7 @@ test('a remote glossary cannot run shell templates or receive the GitHub token o
 	expect(w.ran.filter((argv) => argv[0] === 'sh')).toEqual([['sh', '-c', 'echo hi']]);
 });
 
-test('a GitHub raw include gets the token and runs shell only when the local include opts in', async ($, on) => {
+test('a GitHub raw include gets the token but never runs shell, even when the include asks to', async ($, on) => {
 	const remote = 'https://raw.githubusercontent.com/o/r/main/g.json';
 	const w = world(
 		on,
@@ -354,7 +354,8 @@ test('a GitHub raw include gets the token and runs shell only when the local inc
 	await start($);
 	expect(w.fetched).toEqual([{ url: remote, headers: { Authorization: 'Bearer sekret' } }]);
 	const sub = await submit($, 'gadget');
-	expect(sub.context?.[0] ?? '').toContain('Today is hi.');
+	expect(sub.context?.[0] ?? '').toContain('Today is [shell template disabled: remote glossary source].');
+	expect(w.ran.filter((argv) => argv[0] === 'sh')).toEqual([]);
 });
 
 const PROJECT = `${CWD}/.claude/glossary.json`;
