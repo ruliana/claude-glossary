@@ -171,7 +171,7 @@ describe('loading', () => {
 	test('a bad regex from a URL include drops only that entry', async () => {
 		const R = 'https://example.com/r.json'
 		const r = await load(fakeIO(
-			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R, allowPatterns: true }]) },
+			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R }]) },
 			{ [R]: j([{ term: 'bad', definition: 'B', pattern: '(' }, { term: 'good', definition: 'G' }, { term: 'badflags', definition: 'F', flags: 'zz' }]) },
 		))
 		expect(r.error).toBeUndefined()
@@ -468,27 +468,12 @@ describe('shell template trust', () => {
 		))
 		expect(r.entries[0]!.allowShell).toBe(false)
 	})
-	test('allowShell on an include in a local file opts that remote source in', async () => {
+	test('an include cannot opt a remote source in to shell', async () => {
 		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowShell: true }]) },
+			{ [`${G}.json`]: j([{ include: R, allowShell: true }]) },
 			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
 		))
-		expect(r.entries[0]!.allowShell).toBe(true)
-	})
-	test('allowShell is ignored on an http include', async () => {
-		const H = 'http://example.com/r.json'
-		const r = await load(fakeIO(
-			{ [`${G}.json`]: j([{ include: H, allowShell: true }]) },
-			{ [H]: j([{ term: 'r', definition: '{{id}}' }]) },
-		))
-		expect(r.entries[0]!.allowShell).toBe(false)
-		expect(r.warnings).toEqual([`Ignoring allowShell on ${H}: shell templates need an https URL`])
-	})
-	test('allowShell must be exactly true', async () => {
-		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowShell: 'yes' }]) },
-			{ [R]: j([{ term: 'r', definition: '{{id}}' }]) },
-		))
+		expect(r.warnings).toEqual([])
 		expect(r.entries[0]!.allowShell).toBe(false)
 	})
 	test('trust never widens below a remote include', async () => {
@@ -504,16 +489,6 @@ describe('shell template trust', () => {
 		))
 		expect(r.warnings).toEqual([])
 		expect(shellOf(r)).toEqual({ r2: false, l: false })
-	})
-	test('an opted-in remote file cannot pass allowShell on to what it includes', async () => {
-		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowShell: true }]) },
-			{
-				[R]: j([{ term: 'r', definition: '{{id}}' }, { include: R2, allowShell: true }]),
-				[R2]: j([{ term: 'r2', definition: '{{id}}' }]),
-			},
-		))
-		expect(shellOf(r)).toEqual({ r: true, r2: false })
 	})
 })
 
@@ -541,30 +516,15 @@ describe('entry origin', () => {
 
 describe('remote patterns', () => {
 	const R = 'https://example.com/r.json'
-	const R2 = 'https://example.com/r2.json'
-	const patternOf = (r: Awaited<ReturnType<typeof load>>) => Object.fromEntries(r.entries.map((e) => [e.term, e.pattern]))
 
-	test('are ignored unless a local include sets allowPatterns', async () => {
+	test('are used as written', async () => {
 		const r = await load(fakeIO(
-			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M', pattern: 'zz+' }, { include: R }]) },
-			{ [R]: j([{ term: 'sneaky', definition: 'S', pattern: '(?:)' }]) },
+			{ [`${G}.json`]: j([{ include: R }]) },
+			{ [R]: j([{ term: 'shared', definition: 'S', pattern: 'zzz-shared' }]) },
 		))
-		expect(patternOf(r)).toEqual({ mine: 'zz+', sneaky: undefined })
-		expect(r.warnings).toEqual([
-			`Ignoring pattern on remote entry "sneaky" from ${R}; matching its term and aliases instead (set "allowPatterns": true on the include to use it)`,
-		])
-		expect(matchEntries(r.entries, 'an unrelated prompt')).toHaveLength(0)
-		expect(matchEntries(r.entries, 'sneaky')).toHaveLength(1)
-	})
-	test('allowPatterns is granted only by a local include', async () => {
-		const r = await load(fakeIO(
-			{ [`${P}.json`]: j([{ include: R, allowPatterns: true }]) },
-			{
-				[R]: j([{ term: 'r', definition: 'R', pattern: 'r+' }, { include: R2, allowPatterns: true }]),
-				[R2]: j([{ term: 'r2', definition: 'R2', pattern: '(?:)' }]),
-			},
-		))
-		expect(patternOf(r)).toEqual({ r: 'r+', r2: undefined })
+		expect(r.warnings).toEqual([])
+		expect(matchEntries(r.entries, 'shared')).toHaveLength(0)
+		expect(matchEntries(r.entries, 'zzz-shared')).toHaveLength(1)
 	})
 })
 
