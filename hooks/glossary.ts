@@ -176,6 +176,20 @@ function extractRefs(definition: string): string[] {
 
 export const SHELL_DISABLED_MARKER = "[shell template disabled: remote glossary source]";
 
+/** Largest remote glossary accepted, in characters. */
+export const MAX_REMOTE_CHARS = 1024 * 1024;
+
+/**
+ * Remove terminal escape sequences and other control characters (keeping tab and newline),
+ * so glossary text and command output cannot drive the terminal when shown.
+ */
+export function stripControlChars(text: string): string {
+	return text
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b[\]P^_X][\s\S]*?(?:\x07|\x1b\\)/g, "")
+		.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
+
 /**
  * Expand `{{cmd}}` placeholders; each distinct command runs once; failures become `[error: msg]`.
  * Without `allowShell` nothing runs and every placeholder becomes `SHELL_DISABLED_MARKER`.
@@ -198,9 +212,9 @@ export async function expandTemplate(
 		let output: string;
 		try {
 			const res = await io.runShell(command, cwd);
-			output = res.ok ? res.stdout.trim() : `[error: ${res.error.trim()}]`;
+			output = res.ok ? stripControlChars(res.stdout).trim() : `[error: ${stripControlChars(res.error).trim()}]`;
 		} catch (error) {
-			output = `[error: ${errMessage(error).split("\n")[0]}]`;
+			output = `[error: ${stripControlChars(errMessage(error).split("\n")[0]!)}]`;
 		}
 		results.set(command, output);
 	}
@@ -242,7 +256,7 @@ export function filterEntries(entries: CompiledEntry[], query: string): Compiled
 // --- Loading ---
 
 function describeGlossaryEntry(entry: Partial<GlossaryEntry>, index: number): string {
-	const term = typeof entry.term === "string" ? entry.term.trim() : "";
+	const term = typeof entry.term === "string" ? stripControlChars(entry.term).trim() : "";
 	return term ? `entry ${index + 1} (term: ${term})` : `entry ${index + 1}`;
 }
 
@@ -273,9 +287,9 @@ function validateGlossaryEntry(entry: GlossaryEntry, index: number): GlossaryEnt
 
 	return {
 		...entry,
-		term: entry.term.trim(),
-		definition: entry.definition.trim(),
-		aliases: entry.aliases?.map((alias) => alias.trim()).filter(Boolean),
+		term: stripControlChars(entry.term).trim(),
+		definition: stripControlChars(entry.definition).trim(),
+		aliases: entry.aliases?.map((alias) => stripControlChars(alias).trim()).filter(Boolean),
 	};
 }
 
@@ -316,7 +330,7 @@ async function resolveGlossaryFile(io: GlossaryIO, basePath: string): Promise<st
 	return hasJsonl ? jsonlFile : jsonFile;
 }
 
-type GlossaryInclude = { include: string; allowShell?: unknown };
+type GlossaryInclude = { include: string; allowShell?: unknown; allowPatterns?: unknown };
 
 function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
 	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
@@ -370,7 +384,9 @@ async function fetchGlossaryUrl(io: GlossaryIO, url: string, withToken: boolean)
 		const token = await io.githubToken();
 		if (token) headers["Authorization"] = `Bearer ${token}`;
 	}
-	return io.fetchText(url, headers);
+	const text = await io.fetchText(url, headers);
+	if (text.length > MAX_REMOTE_CHARS) throw new Error(`response is larger than ${MAX_REMOTE_CHARS} characters`);
+	return text;
 }
 
 type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; label?: string };
@@ -386,6 +402,12 @@ type Ctx = {
 	visited: Set<string>;
 	warnings: string[];
 	trusted: boolean;
+	/**
+	 * Entries below a URL include may use their own `pattern`. A pattern runs on every keystroke
+	 * and prompt, so a hostile one (catastrophic backtracking) could freeze the session; a remote
+	 * file gets this only when its include, written in a local file, sets `"allowPatterns": true`.
+	 */
+	allowPatterns: boolean;
 	/** Origin of the file being read; becomes "remote" below a URL include and never changes back. */
 	origin: GlossaryOrigin;
 };
@@ -420,8 +442,10 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 					if (item.allowShell === true && overHttp) {
 						ctx.warnings.push(`Ignoring allowShell on ${source}: shell templates need an https URL`);
 					}
-					const trusted = ctx.trusted && item.allowShell === true && !overHttp;
-					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, origin: "remote" })));
+					// Only an include written in a local file can grant these, never one inside a remote file.
+					const trusted = ctx.trusted && ctx.origin !== "remote" && item.allowShell === true && !overHttp;
+					const allowPatterns = ctx.origin !== "remote" && item.allowPatterns === true;
+					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, allowPatterns, origin: "remote" })));
 				} else {
 					const absBase = resolvePath(ctx.cwd, source);
 					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
@@ -435,6 +459,12 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
+			if (ctx.origin === "remote" && !ctx.allowPatterns && validated.pattern !== undefined) {
+				ctx.warnings.push(
+					`Ignoring pattern on remote entry "${validated.term}" from ${defaultSource}; matching its term and aliases instead (set "allowPatterns": true on the include to use it)`,
+				);
+				delete validated.pattern;
+			}
 			// Any `source` in the file is ignored, so a remote file cannot pass itself off as one of the user's files.
 			result.push({ ...validated, source: defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
 		}
@@ -467,7 +497,7 @@ async function loadGlossaryFile(file: string, ctx: Ctx): Promise<LoadedFile> {
 export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: string }): Promise<LoadResult> {
 	const warnings: string[] = [];
 	try {
-		const ctx: Omit<Ctx, "origin"> = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true };
+		const ctx: Omit<Ctx, "origin"> = { io, home: opts.home, cwd: opts.cwd, visited: new Set<string>(), warnings, trusted: true, allowPatterns: true };
 		const globalFile = await resolveGlossaryFile(io, globalGlossaryBase(opts.home));
 		const projectFile = await resolveGlossaryFile(io, projectGlossaryBase(opts.cwd));
 		const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
@@ -495,8 +525,8 @@ export async function loadGlossary(io: GlossaryIO, opts: { home: string; cwd: st
 		}
 
 		const files = [globalResult, projectResult].filter((r) => r.found).map((r) => r.label ?? r.path);
-		return { entries, files, warnings };
+		return { entries, files, warnings: warnings.map(stripControlChars) };
 	} catch (error) {
-		return { entries: [], files: [], warnings, error: errMessage(error) };
+		return { entries: [], files: [], warnings: warnings.map(stripControlChars), error: stripControlChars(errMessage(error)) };
 	}
 }
