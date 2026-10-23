@@ -19,6 +19,7 @@ import type { CompiledEntry, GlossaryIO, LoadResult } from './glossary';
 const PANE = 'glossary';
 const TOOL = 'mcp__glossary__lookup';
 const DEFAULT_OFFERED_KEY = 'defaultGlossaryOffered';
+const FETCH_TIMEOUT_MS = 10_000;
 
 // State a drawing or a reload must see lives in `$.state` (it survives a hot
 // reload of this module). Compiled entries hold RegExps, which are not plain
@@ -47,9 +48,18 @@ function makeIO($: EngineInterface): GlossaryIO {
 		readFile: async (path) => ((await $.fs.exists(path)) ? String(await $.fs.read(path)) : undefined),
 		exists: (path) => $.fs.exists(path),
 		fetchText: async (url, headers) => {
-			const res = await $.http.fetch(url, { headers });
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			return res.text;
+			// $.http.fetch has no timeout of its own, so a stalled host could hold the glossary load.
+			let timer: { cancel: () => void } | undefined;
+			const timeout = new Promise<never>((_, reject) => {
+				timer = $.clock.after(FETCH_TIMEOUT_MS, () => reject(new Error(`timed out after ${FETCH_TIMEOUT_MS / 1000}s`)));
+			});
+			try {
+				const res = await Promise.race([$.http.fetch(url, { headers }), timeout]);
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				return res.text;
+			} finally {
+				timer?.cancel();
+			}
 		},
 		githubToken: async () => {
 			const fromEnv = await $.env.get('GITHUB_TOKEN');

@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'claude-code/testing'
 import {
 	buildContextBlock, buildMatcher, expandTemplate, filterEntries, findTerm, formatEntry,
-	globalGlossaryBase, isGitHubUrl, SHELL_DISABLED_MARKER, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
+	globalGlossaryBase, isGitHubUrl, MAX_REMOTE_CHARS, SHELL_DISABLED_MARKER, stripControlChars, loadGlossary, matchEntries, matchRanges, projectGlossaryBase,
 	GLOSSARY_HEADING, GLOSSARY_PREAMBLE, SUBAGENT_PREAMBLE, UNTRUSTED_NOTE,
 } from './glossary'
 import type { CompiledEntry, GlossaryEntry, GlossaryIO } from './glossary'
@@ -171,7 +171,7 @@ describe('loading', () => {
 	test('a bad regex from a URL include drops only that entry', async () => {
 		const R = 'https://example.com/r.json'
 		const r = await load(fakeIO(
-			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R }]) },
+			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R, allowPatterns: true }]) },
 			{ [R]: j([{ term: 'bad', definition: 'B', pattern: '(' }, { term: 'good', definition: 'G' }, { term: 'badflags', definition: 'F', flags: 'zz' }]) },
 		))
 		expect(r.error).toBeUndefined()
@@ -505,6 +505,16 @@ describe('shell template trust', () => {
 		expect(r.warnings).toEqual([])
 		expect(shellOf(r)).toEqual({ r2: false, l: false })
 	})
+	test('an opted-in remote file cannot pass allowShell on to what it includes', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R, allowShell: true }]) },
+			{
+				[R]: j([{ term: 'r', definition: '{{id}}' }, { include: R2, allowShell: true }]),
+				[R2]: j([{ term: 'r2', definition: '{{id}}' }]),
+			},
+		))
+		expect(shellOf(r)).toEqual({ r: true, r2: false })
+	})
 })
 
 describe('entry origin', () => {
@@ -526,5 +536,68 @@ describe('entry origin', () => {
 			{ [R]: j([{ include: 'local.json' }]) },
 		))
 		expect(r.entries[0]!.origin).toBe('remote')
+	})
+})
+
+describe('remote patterns', () => {
+	const R = 'https://example.com/r.json'
+	const R2 = 'https://example.com/r2.json'
+	const patternOf = (r: Awaited<ReturnType<typeof load>>) => Object.fromEntries(r.entries.map((e) => [e.term, e.pattern]))
+
+	test('are ignored unless a local include sets allowPatterns', async () => {
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M', pattern: 'zz+' }, { include: R }]) },
+			{ [R]: j([{ term: 'sneaky', definition: 'S', pattern: '(?:)' }]) },
+		))
+		expect(patternOf(r)).toEqual({ mine: 'zz+', sneaky: undefined })
+		expect(r.warnings).toEqual([
+			`Ignoring pattern on remote entry "sneaky" from ${R}; matching its term and aliases instead (set "allowPatterns": true on the include to use it)`,
+		])
+		expect(matchEntries(r.entries, 'an unrelated prompt')).toHaveLength(0)
+		expect(matchEntries(r.entries, 'sneaky')).toHaveLength(1)
+	})
+	test('allowPatterns is granted only by a local include', async () => {
+		const r = await load(fakeIO(
+			{ [`${P}.json`]: j([{ include: R, allowPatterns: true }]) },
+			{
+				[R]: j([{ term: 'r', definition: 'R', pattern: 'r+' }, { include: R2, allowPatterns: true }]),
+				[R2]: j([{ term: 'r2', definition: 'R2', pattern: '(?:)' }]),
+			},
+		))
+		expect(patternOf(r)).toEqual({ r: 'r+', r2: undefined })
+	})
+})
+
+describe('control characters', () => {
+	const R = 'https://example.com/r.json'
+	const esc = '\x1b]52;c;cHduZWQ=\x07\x1b[31m'
+
+	test('stripControlChars removes escape sequences, keeping tab and newline', () => {
+		expect(stripControlChars(`a${esc}b\tc\nd\x9b\x00`)).toBe('ab\tc\nd')
+	})
+	test('are stripped from remote entries and warnings', async () => {
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ include: R }, { include: `missing${esc}.json` }]) },
+			{ [R]: j([{ term: `evil${esc}`, aliases: [`al${esc}`], definition: `bad${esc}\nline` }]) },
+		))
+		expect(r.entries[0]).toMatchObject({ term: 'evil', aliases: ['al'], definition: 'bad\nline' })
+		expect(r.warnings).toHaveLength(1)
+		expect(r.warnings[0]).not.toContain('\x1b')
+	})
+	test('are stripped from shell output and errors', async () => {
+		const io = fakeIO({}, {}, { shell: { ok: `\x1b[31mred\x1b[0m`, bad: new Error(`no${esc}`) } })
+		expect(await expandTemplate(io, '{{ok}} {{bad}}', CWD, { allowShell: true })).toBe('red [error: no]')
+	})
+})
+
+describe('remote size limit', () => {
+	test('a response over the limit is a failed include', async () => {
+		const R = 'https://example.com/big.json'
+		const r = await load(fakeIO(
+			{ [`${G}.json`]: j([{ term: 'mine', definition: 'M' }, { include: R }]) },
+			{ [R]: j([{ term: 'big', definition: 'x'.repeat(MAX_REMOTE_CHARS) }]) },
+		))
+		expect(r.entries.map((e) => e.term)).toEqual(['mine'])
+		expect(r.warnings).toEqual([`Failed to include ${R}: response is larger than ${MAX_REMOTE_CHARS} characters`])
 	})
 })
