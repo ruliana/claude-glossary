@@ -84,6 +84,9 @@ function world(
 	});
 	on('process.run', (_$, e) => {
 		w.ran.push([...e.argv]);
+		if (e.argv[0] === 'fetch-glossary') {
+			return { value: { exitCode: 0, stdout: JSON.stringify([{ term: 'gizmo', definition: 'A gizmo.' }]), stderr: '' } } as never;
+		}
 		const cmd = e.argv[2] ?? '';
 		return { value: { exitCode: 0, stdout: cmd === 'echo hi' ? 'hi' : '', stderr: '' } } as never;
 	});
@@ -356,6 +359,21 @@ test('a GitHub raw include gets the token but never runs shell, even when the in
 	const sub = await submit($, 'gadget');
 	expect(sub.context?.[0] ?? '').toContain('Today is [shell template disabled: remote glossary source].');
 	expect(w.ran.filter((argv) => argv[0] === 'sh')).toEqual([]);
+});
+
+test('a configured fetcher runs its program directly instead of fetching', async ($, on) => {
+	const url = 'https://glossary.example.com/team.json';
+	const w = world(on, {
+		[GLOBAL]: JSON.stringify([{ include: url }]),
+		[`${HOME}/.claude/glossary-fetchers.json`]: JSON.stringify([
+			{ match: '^https://glossary\\.example\\.com/[a-z]+\\.json$', command: ['fetch-glossary', '{url}'] },
+		]),
+	});
+	await start($);
+	expect(w.fetched).toEqual([]);
+	expect(w.ran).toContainEqual(['fetch-glossary', url]);
+	const sub = await submit($, 'gizmo');
+	expect(sub.context?.[0] ?? '').toContain('_Not written by the user');
 });
 
 const PROJECT = `${CWD}/.claude/glossary.json`;

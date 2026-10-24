@@ -9,18 +9,29 @@ import type { CompiledEntry, GlossaryEntry, GlossaryIO } from './glossary'
 const HOME = '/home/u'
 const CWD = '/work/proj'
 
-type Fake = GlossaryIO & { fetched: Array<{ url: string; headers: Record<string, string> }>; ran: string[] }
+type Fake = GlossaryIO & {
+	fetched: Array<{ url: string; headers: Record<string, string> }>
+	ran: string[]
+	commands: Array<{ argv: string[]; cwd: string; timeoutMs: number }>
+}
 
 function fakeIO(
 	files: Record<string, string> = {},
 	urls: Record<string, string> = {},
-	opts: { token?: string; shell?: Record<string, string | Error> } = {},
+	opts: { token?: string; shell?: Record<string, string | Error>; command?: (argv: string[]) => string | Error } = {},
 ): Fake {
 	const fetched: Fake['fetched'] = []
 	const ran: string[] = []
+	const commands: Fake['commands'] = []
 	return {
 		fetched,
 		ran,
+		commands,
+		runCommand: async (argv, { cwd, timeoutMs }) => {
+			commands.push({ argv, cwd, timeoutMs })
+			const r = opts.command?.(argv) ?? new Error('command not found')
+			return r instanceof Error ? { ok: false, error: r.message } : { ok: true, stdout: r }
+		},
 		readFile: async (p) => files[p],
 		exists: async (p) => p in files,
 		fetchText: async (url, headers) => {
@@ -559,5 +570,168 @@ describe('remote size limit', () => {
 		))
 		expect(r.entries.map((e) => e.term)).toEqual(['mine'])
 		expect(r.warnings).toEqual([`Failed to include ${R}: response is larger than ${MAX_REMOTE_CHARS} characters`])
+	})
+})
+
+describe('fetchers', () => {
+	const F = `${HOME}/.claude/glossary-fetchers.json`
+	const out = (items: unknown[]) => () => j(items)
+
+	test('a matching include runs the configured program instead of a GET, and stays remote', async () => {
+		const io = fakeIO(
+			{
+				[F]: j([{ name: 'gist', match: '^https://gist\\.github\\.com/me/(?<id>[0-9a-f]+)$', command: ['gh', 'gist', 'view', '{id}', '--raw'] }]),
+				[`${G}.json`]: j([{ include: 'https://gist.github.com/me/abc123' }]),
+			},
+			{},
+			{ command: out([{ term: 'secret', definition: 's {{echo RAN}}' }]) },
+		)
+		const r = await load(io)
+		expect(r.error).toBeUndefined()
+		expect(io.commands).toEqual([{ argv: ['gh', 'gist', 'view', 'abc123', '--raw'], cwd: HOME, timeoutMs: 10000 }])
+		expect(io.fetched).toEqual([])
+		const e = findTerm(r.entries, 'secret')!
+		expect(e.origin).toBe('remote')
+		expect(e.allowShell).toBe(false)
+		expect(e.source).toBe('https://gist.github.com/me/abc123')
+	})
+
+	test('the URL is appended as one argument when there is no placeholder, and ~/ is expanded', async () => {
+		const url = 'https://example.com/a;touch${IFS}x $(id)'
+		const io = fakeIO(
+			{ [F]: j([{ match: 'https://example\\.com/.*', command: ['~/bin/fetch'] }]), [`${G}.json`]: j([{ include: url }]) },
+			{},
+			{ command: out([]) },
+		)
+		await load(io)
+		expect(io.commands.map((c) => c.argv)).toEqual([[`${HOME}/bin/fetch`, url]])
+	})
+
+	test('must match the whole URL', async () => {
+		const io = fakeIO(
+			{
+				[F]: j([
+					{ match: 'https://example\\.com/[a-z]+\\.json', command: ['f'] },
+					{ match: 'https://a\\.example|https://b\\.example/x\\.json', command: ['f'] },
+				]),
+				[`${G}.json`]: j([
+					{ include: 'https://evil.example/?u=https://example.com/g.json' },
+					{ include: 'https://example.com/g.json.evil.example/x.json' },
+					{ include: 'https://a.example.evil.example/x.json' },
+				]),
+			},
+			{},
+			{ command: out([]) },
+		)
+		await load(io)
+		expect(io.commands).toEqual([])
+		expect(io.fetched).toHaveLength(3)
+	})
+
+	test('run only for includes in the scopes they allow', async () => {
+		const remote = 'https://example.com/r.json'
+		const io = fakeIO(
+			{
+				[F]: j([{ name: 'private', match: 'https://private\\.example/.*', command: ['f'] }]),
+				[`${G}.json`]: j([{ include: remote }]),
+				[`${P}.json`]: j([{ include: 'https://private.example/from-project.json' }]),
+			},
+			{ [remote]: j([{ include: 'https://private.example/from-remote.json' }]) },
+			{ command: out([]) },
+		)
+		const r = await load(io)
+		expect(io.commands).toEqual([])
+		expect(io.fetched.map((f) => f.url)).toEqual([remote])
+		expect(r.warnings.some((w) => w.includes('fetcher "private" matches this URL but is not enabled for includes in a project glossary'))).toBe(true)
+		expect(r.warnings.some((w) => w.includes('not enabled for includes in a remote glossary'))).toBe(true)
+	})
+
+	test('scopes can allow project includes', async () => {
+		const io = fakeIO(
+			{
+				[F]: j([{ match: 'https://private\\.example/.*', command: ['f'], scopes: ['global', 'project'] }]),
+				[`${P}.json`]: j([{ include: 'https://private.example/p.json' }]),
+			},
+			{},
+			{ command: out([{ term: 't', definition: 'd' }]) },
+		)
+		const r = await load(io)
+		expect(io.commands.map((c) => c.argv)).toEqual([['f', 'https://private.example/p.json']])
+		expect(findTerm(r.entries, 't')?.origin).toBe('remote')
+	})
+
+	test('a project cannot configure fetchers', async () => {
+		const io = fakeIO(
+			{
+				[`${CWD}/.claude/glossary-fetchers.json`]: j([{ match: '.*', command: ['f'], scopes: ['project'] }]),
+				[`${P}.json`]: j([{ include: 'https://example.com/p.json' }]),
+			},
+			{},
+			{ command: out([]) },
+		)
+		await load(io)
+		expect(io.commands).toEqual([])
+		expect(io.fetched.map((f) => f.url)).toEqual(['https://example.com/p.json'])
+	})
+
+	test('a placeholder value that would become an option is refused', async () => {
+		const io = fakeIO(
+			{
+				[F]: j([{ name: 'loose', match: 'https://example\\.com/(.*)', command: ['f', '{1}'] }]),
+				[`${G}.json`]: j([{ include: 'https://example.com/--output=/etc/passwd' }]),
+			},
+			{},
+			{ command: out([]) },
+		)
+		const r = await load(io)
+		expect(io.commands).toEqual([])
+		expect(r.warnings.some((w) => w.includes('fetcher "loose" refused an argument that starts with "-"'))).toBe(true)
+	})
+
+	test('failures, size limit and format', async () => {
+		const io = fakeIO(
+			{
+				[F]: j([
+					{ name: 'bad', match: 'https://bad\\.example/.*', command: ['bad'], timeoutMs: 2000 },
+					{ name: 'big', match: 'https://big\\.example/.*', command: ['big'] },
+					{ name: 'lines', match: 'https://lines\\.example/.*', command: ['lines'], format: 'jsonl' },
+				]),
+				[`${G}.json`]: j([
+					{ include: 'https://bad.example/g.json' },
+					{ include: 'https://big.example/g.json' },
+					{ include: 'https://lines.example/g' },
+				]),
+			},
+			{},
+			{
+				command: (argv) =>
+					argv[0] === 'bad' ? new Error('not signed in\nmore')
+					: argv[0] === 'big' ? 'x'.repeat(MAX_REMOTE_CHARS + 1)
+					: '{"term":"one","definition":"1"}\n{"term":"two","definition":"2"}\n',
+			},
+		)
+		const r = await load(io)
+		expect(io.commands[0]!.timeoutMs).toBe(2000)
+		expect(r.warnings).toContain('Failed to include https://bad.example/g.json: fetcher "bad" failed: not signed in')
+		expect(r.warnings).toContain(`Failed to include https://big.example/g.json: response is larger than ${MAX_REMOTE_CHARS} characters`)
+		expect(findTerm(r.entries, 'two')).toBeDefined()
+	})
+
+	test('a bad fetcher config is a load error', async () => {
+		for (const [config, message] of [
+			['nope', 'not valid JSON'],
+			[j({}), 'root value must be an array'],
+			[j([{ match: 'x', command: 'gh gist view' }]), '"command" must be a non-empty array of strings'],
+			[j([{ match: '(', command: ['f'] }]), '"match" is not a valid regex'],
+			[j([{ match: 'x', command: ['{url}'] }]), 'must be a fixed name'],
+			[j([{ match: 'x', command: ['./f'] }]), 'must be on PATH'],
+			[j([{ match: 'x', command: ['f'], scopes: ['everywhere'] }]), '"scopes" must be'],
+			[j([{ match: 'x', command: ['f'], timeoutMs: 600000 }]), '"timeoutMs" must be'],
+			[j([{ match: 'x', command: ['f'], regex: 'y' }]), 'unknown field(s): regex'],
+		] as const) {
+			const r = await load(fakeIO({ [F]: config, [`${G}.json`]: j([{ term: 't', definition: 'd' }]) }))
+			expect(r.error).toContain(message)
+			expect(r.entries).toEqual([])
+		}
 	})
 })

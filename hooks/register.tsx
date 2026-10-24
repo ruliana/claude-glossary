@@ -8,6 +8,7 @@ import {
 	expandTemplate,
 	filterEntries,
 	findTerm,
+	FETCH_TIMEOUT_MS,
 	formatEntry,
 	loadGlossary,
 	matchEntries,
@@ -19,7 +20,6 @@ import type { CompiledEntry, GlossaryIO, LoadResult } from './glossary';
 const PANE = 'glossary';
 const TOOL = 'mcp__glossary__lookup';
 const DEFAULT_OFFERED_KEY = 'defaultGlossaryOffered';
-const FETCH_TIMEOUT_MS = 10_000;
 
 // State a drawing or a reload must see lives in `$.state` (it survives a hot
 // reload of this module). Compiled entries hold RegExps, which are not plain
@@ -75,6 +75,16 @@ function makeIO($: EngineInterface): GlossaryIO {
 		runShell: async (command, dir) => {
 			try {
 				const res = await $.process.run(['sh', '-c', command], { cwd: dir, timeoutMs: 5000 });
+				return res.exitCode === 0
+					? { ok: true, stdout: res.stdout }
+					: { ok: false, error: res.stderr.trim() || `exit code ${res.exitCode}` };
+			} catch (error) {
+				return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			}
+		},
+		runCommand: async (argv, { cwd: dir, timeoutMs }) => {
+			try {
+				const res = await $.process.run(argv, { cwd: dir, timeoutMs });
 				return res.exitCode === 0
 					? { ok: true, stdout: res.stdout }
 					: { ok: false, error: res.stderr.trim() || `exit code ${res.exitCode}` };
