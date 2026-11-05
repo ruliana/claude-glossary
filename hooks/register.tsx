@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code';
-import type { EngineInterface, Register } from 'claude-code';
+import type { EngineInterface, PromptDecoration, Register } from 'claude-code';
 
 import type { GlossaryPaneEntry } from '../types';
 import { DEFAULT_GLOSSARY } from './default-glossary';
@@ -157,8 +157,31 @@ async function load($: EngineInterface, opts: { keepOnError?: boolean } = {}): P
 		})),
 	);
 	await update($, errorState, () => result.error ?? null);
+	// Terms already in the draft light up (or go dark) with the new glossary.
+	await paintDraft($);
 	return result;
 };
+
+/** Bold, warning-colored runs over every glossary term in `text` (the prompt highlight). */
+function termMarks(text: string): PromptDecoration[] {
+	if (entries.length === 0 || !text) return [];
+	return matchRanges(entries, text).map((m) => ({ start: m.start, end: m.end, bold: true, color: 'warning' }));
+}
+
+/**
+ * Paint the glossary terms over a draft the person did not just type: one put
+ * in by history or undo, or the draft standing when the glossary (re)loads.
+ * Painting only ever decorates, so a failure is ignored.
+ */
+async function paintDraft($: EngineInterface, text?: string) {
+	try {
+		const draft = text ?? (await $.prompt.read()).text;
+		if (!draft && text === undefined) return;
+		await $.prompt.paint({ text: draft, decorations: termMarks(draft) });
+	} catch {
+		// No box to paint (headless) or a hook refused: nothing to show.
+	}
+}
 
 /**
  * Reload when a watched glossary file was created, edited or deleted since the
@@ -318,17 +341,20 @@ export const register: Register = (on) => {
 		return { result: formatEntry({ ...entry, definition }) };
 	});
 
-	// Live highlight of glossary terms in the prompt box.
+	// Live highlight of glossary terms in the prompt box, as the person types.
 	on('prompt.edit', async ($, e, next) => {
 		const r = await next(e);
-		if (entries.length === 0 || !r.text) return r;
-		const marks = matchRanges(entries, r.text).map((m) => ({
-			start: m.start,
-			end: m.end,
-			bold: true,
-			color: 'warning',
-		}));
+		const marks = termMarks(r.text);
 		return marks.length === 0 ? r : { ...r, decorations: [...(r.decorations ?? []), ...marks] };
+	});
+
+	// The box also changes without an edit: a recalled history entry, an undo,
+	// another plugin's fill. Those carry no `prompt.edit`, so paint them here
+	// (pi's editor does the same from `setText`).
+	on('prompt.change', async ($, e, next) => {
+		const r = await next(e);
+		await paintDraft($, e.text);
+		return r;
 	});
 
 	// Compaction summarizes the conversation, and the definitions we injected

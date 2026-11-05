@@ -288,6 +288,36 @@ test('prompt.edit decorates glossary terms bold in the warning color', async ($,
 	expect(r.decorations).toEqual([{ start: 2, end: 8, bold: true, color: 'warning' }]);
 });
 
+test('a draft put back by history or undo is painted too', async ($, on) => {
+	world(on);
+	const painted: unknown[] = [];
+	on('prompt.read', () => ({ value: { text: '', cursor: 0 } }));
+	on('prompt.paint', (_$, e) => (painted.push(e), { value: { isPainted: true, text: e.text ?? '', cursor: 0 } }));
+	on('prompt.change', (_$, e) => ({ text: e.text }));
+	await start($);
+	const change = ($ as unknown as { prompt: { change: (e: unknown) => Promise<unknown> } }).prompt.change;
+	await change({ text: 'the gizmo and the flange', cursor: 0, origin: { kind: 'history' } });
+	expect(painted.at(-1)).toEqual({
+		text: 'the gizmo and the flange',
+		decorations: [
+			{ start: 4, end: 9, bold: true, color: 'warning' },
+			{ start: 18, end: 24, bold: true, color: 'warning' },
+		],
+	});
+	// A recall to a draft without terms clears the earlier paint.
+	await change({ text: 'nothing here', cursor: 0, origin: { kind: 'undo' } });
+	expect(painted.at(-1)).toEqual({ text: 'nothing here', decorations: [] });
+});
+
+test('a draft standing when the glossary loads is painted', async ($, on) => {
+	world(on);
+	const painted: unknown[] = [];
+	on('prompt.read', () => ({ value: { text: 'a widget', cursor: 8 } }));
+	on('prompt.paint', (_$, e) => (painted.push(e), { value: { isPainted: true, text: e.text ?? '', cursor: 0 } }));
+	await start($);
+	expect(painted.at(-1)).toEqual({ text: 'a widget', decorations: [{ start: 2, end: 8, bold: true, color: 'warning' }] });
+});
+
 test('session.compact resets loaded terms so they inject again', async ($, on) => {
 	const w = world(on);
 	on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }));
